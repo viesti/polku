@@ -13,21 +13,18 @@
   "main": "dist/client.js",
   "exports": {
     ".": "./dist/client.js",
-    "./client": "./dist/client.js",
-    "./server": "./server/index.js"
+    "./client": "./dist/client.js"
   },
   "files": [
     "bin",
     "dist",
-    "server",
     "skill",
     "src",
     "deps.edn"
   ],
   "scripts": {
-    "build": "shadow-cljs release client",
-    "watch": "shadow-cljs watch client",
-    "test": "node --test",
+    "build": "shadow-cljs release client cli",
+    "watch": "shadow-cljs watch client cli",
     "prepack": "npm run build"
   },
   "devDependencies": {

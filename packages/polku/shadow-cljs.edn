@@ -5,4 +5,10 @@
    :runtime    :browser
    :output-dir "dist"
    :modules    {:client {:exports {init polku.client.core/init}}}
-   :compiler-options {:infer-externs :auto}}}}
+   :compiler-options {:infer-externs :auto}}
+
+  :cli
+  {:target    :node-script
+   :main      polku.server.cli/main
+   ;; The package is `"type": "module"`, so the CommonJS script needs the .cjs extension
+   :output-to "dist/polku.cjs"}}}

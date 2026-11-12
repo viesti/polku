@@ -8,7 +8,7 @@ This repository is a local proof of concept. Design documents are numbered in th
 
 | Path | Contents |
 | --- | --- |
-| `packages/polku` | The `polku` npm package: browser client (ClojureScript, compiled to an ES module), ingest server and CLI (Node, no dependencies) |
+| `packages/polku` | The `polku` npm package, written in ClojureScript under src: the browser client (compiled to an ES module) and the ingest server with its CLI (compiled to a Node script). The compiled package has no runtime dependencies |
 | `demo` | A blank Clojure and ClojureScript web app that links the client, for trying the loop |
 
 ## How the loop works
@@ -39,7 +39,7 @@ Requirements: Node 20+, a JDK, the Clojure CLI, and Docker. The demo runs Postgr
 
 ```sh
 cd demo
-npm install
+npm install          # also builds packages/polku, which the demo links
 npm run dev          # PostgreSQL, backend + nREPL, shadow-cljs, Tailwind, polku server
 ```
 
@@ -67,7 +67,7 @@ npx polku watch -- claude -p --permission-mode acceptEdits
 ## Adding Polku to another app
 
 ```sh
-npm install --save-dev polku     # from this repo: npm install --save-dev ../packages/polku
+npm install --save-dev polku     # from this repo: build packages/polku, then npm install --save-dev ../packages/polku
 npx polku init                   # installs .claude/skills/polku and ignores .polku/
 npx polku serve                  # alongside the app's dev server
 ```
@@ -109,7 +109,7 @@ polku init                                   install the Claude Code skill
 ```sh
 cd packages/polku
 npm install
-npm run build        # shadow-cljs release → dist/client.js
+npm run build        # shadow-cljs release → dist/client.js (browser) and dist/polku.cjs (CLI)
 ```
 
 ## Not built yet

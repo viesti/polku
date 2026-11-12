@@ -2,6 +2,7 @@
   "name": "polku-demo",
   "private": true,
   "scripts": {
+    "postinstall": "npm --prefix ../packages/polku install && npm --prefix ../packages/polku run build",
     "db": "bin/db start",
     "db:stop": "bin/db stop",
     "cljs": "shadow-cljs watch app",
