@@ -49,9 +49,10 @@ In a second terminal, start the agent in the demo directory:
 
 ```sh
 cd demo
-claude
-> /polku
+npm run agent
 ```
+
+`npm run agent` opens Claude Code with a first prompt that starts the Polku loop. In a Claude Code session that is already open, type `/polku` instead. Until one of the two has happened, recordings wait in .polku/sessions with status `complete`.
 
 Then, in the browser: press Record, allow the microphone and tab sharing, say or type what you want ("add a heading that says Orders, and under it a table of orders with customer and amount"), and press Stop & send. The widget shows when the agent picks the request up and what it did.
 

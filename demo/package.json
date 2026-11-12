@@ -8,6 +8,7 @@
     "css": "tailwindcss -i src/css/app.css -o resources/public/css/app.css --watch=always",
     "api": "clojure -M:dev",
     "polku": "polku serve",
+    "agent": "claude \"Use the polku skill: start waiting for recordings and implement each one as it arrives.\"",
     "dev": "bin/db start && concurrently -k -n api,cljs,css,polku -c blue,green,magenta,yellow npm:api npm:cljs npm:css npm:polku 2>&1 | tee .dev.log"
   },
   "dependencies": {
