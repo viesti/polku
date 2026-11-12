@@ -1,0 +1,24 @@
+{
+  "name": "polku-demo",
+  "private": true,
+  "scripts": {
+    "db": "bin/db start",
+    "db:stop": "bin/db stop",
+    "cljs": "shadow-cljs watch app",
+    "css": "tailwindcss -i src/css/app.css -o resources/public/css/app.css --watch=always",
+    "api": "clojure -M:dev",
+    "polku": "polku serve",
+    "dev": "bin/db start && concurrently -k -n api,cljs,css,polku -c blue,green,magenta,yellow npm:api npm:cljs npm:css npm:polku 2>&1 | tee .dev.log"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.5",
+    "concurrently": "^10.0.7",
+    "polku": "file:../packages/polku",
+    "shadow-cljs": "^3.5.14",
+    "tailwindcss": "^4.3.5"
+  }
+}

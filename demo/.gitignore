@@ -1,0 +1,8 @@
+node_modules/
+.cpcache/
+.shadow-cljs/
+.nrepl-port
+.polku/
+resources/public/js/
+resources/public/css/
+.dev.log

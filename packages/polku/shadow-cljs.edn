@@ -1,0 +1,8 @@
+{:source-paths ["src"]
+ :builds
+ {:client
+  {:target     :esm
+   :runtime    :browser
+   :output-dir "dist"
+   :modules    {:client {:exports {init polku.client.core/init}}}
+   :compiler-options {:infer-externs :auto}}}}

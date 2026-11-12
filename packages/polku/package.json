@@ -1,0 +1,36 @@
+{
+  "name": "polku",
+  "version": "0.1.0",
+  "description": "Captures voice, pointer and screen context from a running web app and hands it to a local coding agent",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "polku": "bin/polku.js"
+  },
+  "main": "dist/client.js",
+  "exports": {
+    ".": "./dist/client.js",
+    "./client": "./dist/client.js",
+    "./server": "./server/index.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "server",
+    "skill",
+    "src",
+    "deps.edn"
+  ],
+  "scripts": {
+    "build": "shadow-cljs release client",
+    "watch": "shadow-cljs watch client",
+    "test": "node --test",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "shadow-cljs": "^3.5.14"
+  }
+}
