@@ -43,7 +43,7 @@ npm install          # also builds packages/polku, which the demo links
 npm run dev          # PostgreSQL, backend + nREPL, shadow-cljs, Tailwind, polku server
 ```
 
-Open http://localhost:3000 in Chrome. The page is blank apart from the Record button in the lower right corner.
+`npm run dev` opens http://localhost:3000 in the default browser once the backend answers and the first frontend build is done (set `NO_OPEN=1` to skip that). Recording needs Chrome, so open the address there if another browser is the default. The page is blank apart from the Record button in the lower right corner.
 
 In a second terminal, start the agent in the demo directory:
 

@@ -10,7 +10,8 @@
     "api": "clojure -M:dev",
     "polku": "polku serve",
     "agent": "claude \"Use the polku skill: start waiting for recordings and implement each one as it arrives.\"",
-    "dev": "bin/db start && concurrently -k -n api,cljs,css,polku -c blue,green,magenta,yellow npm:api npm:cljs npm:css npm:polku 2>&1 | tee .dev.log"
+    "dev": "bin/db start && concurrently --kill-others-on-fail -n api,cljs,css,polku,open -c blue,green,magenta,yellow,gray npm:api npm:cljs npm:css npm:polku npm:open 2>&1 | tee .dev.log",
+    "open": "bin/open-when-ready"
   },
   "dependencies": {
     "react": "^19.3.1",
