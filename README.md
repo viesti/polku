@@ -2,7 +2,7 @@
 
 Polku lets someone using a running web app say what they want changed, and hands that request to a coding agent working in the app's source. The person records in the browser: they talk, point and click. The agent receives what they said, what they pointed at and what the screen showed, edits the code, and live reload shows the result in the same browser tab.
 
-This repository is a local proof of concept. The original specification is in [the spec document](Polku%20-%20Autonomous%20Self-Modifying%20Agent%20Loop%20Spec%20%26%20Transcripts.md).
+This repository is a local proof of concept. Design documents are numbered in the doc directory, starting with the original specification, [01-polku-proof-of-concept.md](doc/01-polku-proof-of-concept.md).
 
 ## Layout
 
