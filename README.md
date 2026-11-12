@@ -56,6 +56,8 @@ npm run agent
 
 Then, in the browser: press Record, allow the microphone and tab sharing, say or type what you want ("add a heading that says Orders, and under it a table of orders with customer and amount"), and press Stop & send. The widget shows when the agent picks the request up and what it did.
 
+To return the demo to the blank page, stop `npm run dev` and the agent, then run `bb reset` in the demo directory (needs [Babashka](https://babashka.org)). It lists the uncommitted changes under src and resources, asks for confirmation, then discards them, recreates the database and deletes the recordings.
+
 To run the agent headless instead, with one fresh `claude -p` run per request:
 
 ```sh

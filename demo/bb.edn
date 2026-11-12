@@ -1,0 +1,30 @@
+{:tasks
+ {:requires ([babashka.fs :as fs]
+             [babashka.process :refer [shell]]
+             [clojure.string :as str])
+
+  reset
+  {:doc  "Returns the demo to a blank app: discards source changes, the database and the recordings. Pass --yes to skip the prompt."
+   :task (let [paths   ["src" "resources"]
+               changes (:out (apply shell {:out :string} "git" "status" "--short" "--" paths))
+               port    (or (System/getenv "PORT") "3000")
+               running (try (slurp (str "http://localhost:" port "/api/health")) (catch Exception _ nil))]
+           (when running
+             (println "The demo is running. Stop `npm run dev` and the agent first.")
+             (System/exit 1))
+           (when-not (str/blank? changes)
+             (println "These uncommitted changes will be discarded:")
+             (print changes))
+           (println "The demo database and the recordings in .polku will be deleted.")
+           (when-not (some #{"--yes"} *command-line-args*)
+             (print "Continue? [y/N] ")
+             (flush)
+             (when-not (= "y" (str/lower-case (str/trim (or (read-line) ""))))
+               (println "Nothing was changed.")
+               (System/exit 1)))
+           (apply shell "git" "restore" "--staged" "--worktree" "--" paths)
+           (apply shell "git" "clean" "-fdq" "--" paths)
+           (shell "docker" "compose" "down" "-v")
+           (fs/delete-tree ".polku")
+           (shell "bin/db" "start")
+           (println "The demo is blank again. Start it with `npm run dev` and `npm run agent`."))}}}
