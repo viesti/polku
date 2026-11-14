@@ -136,6 +136,12 @@
                       :hasTranscript (boolean (seq transcript))
                       :hasNote (some? note))))
 
+(defn add-progress!
+  "Appends a step to the progress the agent reports while it works, and returns the manifest."
+  [root id text]
+  (update-manifest! root id update :progress (fnil conj [])
+                    {:at (.toISOString (js/Date.)) :text text}))
+
 (defn list-frames
   "Returns `{:t :file}` for each stored frame, in time order."
   [root id]

@@ -19,6 +19,8 @@
       --timeout <s>     Exit with code 2 if nothing arrives within this many seconds
   watch -- <cmd...>     For each new session, run <cmd> with the task brief on stdin
                         e.g. polku watch -- claude -p --permission-mode acceptEdits
+  progress [id] -m <text>
+                        Show <text> in the user's browser as the step the agent is on
   done [id] -m <text>   Mark a session finished and show <text> in the user's browser
   summary [id]          Print the brief for a session (default: the latest)
   events [id]           Print the raw events of a session as JSON lines
@@ -162,6 +164,15 @@ Common options:
                (ensure-dirs! root)
                (js/console.error (str "polku: watching " (store/sessions-dir root)))
                (watch-loop root args))
+   "progress" (fn [{:keys [root opts args]}]
+                (let [id   (or (first args) (latest root "claimed"))
+                      text (some-> (:message opts) str/trim not-empty)]
+                  (when-not text (fail! "progress needs a message: polku progress [id] -m <text>"))
+                  (when-not id (fail! "no claimed session to report progress on"))
+                  (let [status (:status (store/read-manifest root id))]
+                    (when-not (= "claimed" status)
+                      (fail! (str "session " id " is " status ", so the user no longer sees progress for it"))))
+                  (store/add-progress! root id text)))
    "done"    (fn [{:keys [root opts args]}]
                (let [id (or (first args) (latest root "claimed"))]
                  (when-not id (fail! "no claimed session to finish"))

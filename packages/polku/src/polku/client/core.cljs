@@ -5,6 +5,7 @@
             [polku.client.widget :as widget]))
 
 (def ^:private pending-key "polku:pending")
+(def ^:private lang-key "polku:lang")
 (def ^:private poll-ms 1500)
 
 (def ^:private defaults
@@ -27,15 +28,33 @@
   (try (js/sessionStorage.getItem pending-key)
        (catch :default _ nil)))
 
+(defn- remember-lang! [lang]
+  (try (js/localStorage.setItem lang-key lang)
+       (catch :default _ nil)))
+
+(defn- recall-lang []
+  (try (js/localStorage.getItem lang-key)
+       (catch :default _ nil)))
+
 (defn- options
-  "Normalizes a JavaScript options object or a ClojureScript map into the config map."
+  "Normalizes a JavaScript options object or a ClojureScript map into the config map.
+  `:languages` lists the speech languages the user can choose between. It defaults to `:lang`
+  followed by the browser's preferred languages."
   [opts]
-  (let [m    (if (or (nil? opts) (map? opts)) opts (js->clj opts :keywordize-keys true))
-        m    (cond-> m
-               (contains? m :frameInterval) (assoc :frame-interval (:frameInterval m)))
-        conf (merge defaults
-                    {:lang (or (not-empty js/navigator.language) "en-US")}
-                    (select-keys m [:endpoint :screen :audio :frame-interval :lang]))]
+  (let [m         (if (or (nil? opts) (map? opts)) opts (js->clj opts :keywordize-keys true))
+        m         (cond-> m
+                    (contains? m :frameInterval) (assoc :frame-interval (:frameInterval m)))
+        lang      (or (not-empty (:lang m)) (not-empty js/navigator.language) "en-US")
+        languages (vec (distinct (or (seq (:languages m))
+                                     (cons lang (js->clj (or js/navigator.languages #js []))))))
+        chosen    (recall-lang)
+        conf      (merge defaults
+                         (select-keys m [:endpoint :screen :audio :frame-interval])
+                         {:languages languages
+                          :lang      (cond
+                                       (some #{chosen} languages) chosen
+                                       (some #{lang} languages)   lang
+                                       :else                      (first languages))})]
     (update conf :endpoint str/replace #"/$" "")))
 
 (defn- start-recorder!
@@ -44,7 +63,7 @@
     (set-state! {:view :starting})
     (let [rec (recorder/create
                {:endpoint       (:endpoint config)
-                :lang           (:lang config)
+                :lang           (:lang @!state)
                 :frame-interval (:frame-interval config)
                 :ignore         host
                 :on-update      (fn [{:keys [heard] :as update}]
@@ -85,10 +104,13 @@
                             (do (remember! nil) (set-state! {:view :done :message (.-message s)}))
 
                             :else
-                            (do (when (and (= :waiting (:view @!state))
-                                           (not= (.-status s) (:status @!state)))
-                                  (set-state! {:status (.-status s)}))
-                                (poll! ctx id)))))
+                            (let [status   (.-status s)
+                                  progress (mapv #(.-text ^js %) (or (.-progress s) #js []))]
+                              (when (and (= :waiting (:view @!state))
+                                         (not= [status progress]
+                                               [(:status @!state) (:progress @!state)]))
+                                (set-state! {:status status :progress progress}))
+                              (poll! ctx id)))))
                  ;; The server may be restarting, so the next poll tries again
                  (.catch (fn [_] (poll! ctx id)))))
            poll-ms)))
@@ -102,7 +124,7 @@
       (-> ((:stop rec) note)
           (.then (fn [id]
                    (remember! id)
-                   (set-state! {:view :waiting :id id :status "complete"})
+                   (set-state! {:view :waiting :id id :status "complete" :progress []})
                    (poll! ctx id)
                    id))
           (.catch (fn [^js err]
@@ -115,6 +137,38 @@
   (reset! !recorder nil)
   (set-state! {:view :idle}))
 
+(defn- set-lang!
+  "Makes `lang` the speech language for the current recording and the ones after it."
+  [{:keys [!recorder set-state!]} lang]
+  (remember-lang! lang)
+  (set-state! {:lang lang})
+  (when-let [rec @!recorder]
+    ((:set-lang rec) lang)))
+
+(defn- check-languages!
+  "Drops the languages that the browser's speech recognition reports as unavailable.
+  Browsers without `SpeechRecognition.available` keep the whole list, and so does a check
+  that finds no language available."
+  [{:keys [!state !recorder set-state!]}]
+  (let [^js recognition (or (unchecked-get js/window "SpeechRecognition")
+                            (unchecked-get js/window "webkitSpeechRecognition"))]
+    (when (and recognition (fn? (.-available recognition)))
+      (-> (js/Promise.all
+           (clj->js (for [tag (:languages @!state)]
+                      ;; The executor turns a synchronous throw into a rejection
+                      (-> (js/Promise. (fn [resolve _]
+                                         (resolve (.available recognition #js {:langs #js [tag]}))))
+                          (.then (fn [status] (when-not (= "unavailable" status) tag)))
+                          (.catch (fn [_] tag))))))
+          (.then (fn [tags]
+                   (let [usable (vec (remove nil? tags))
+                         lang   (:lang @!state)
+                         lang'  (if (some #{lang} usable) lang (first usable))]
+                     (when (and (seq usable) (not= usable (:languages @!state)))
+                       (set-state! {:languages usable :lang lang'})
+                       (when-let [rec (and (not= lang lang') @!recorder)]
+                         ((:set-lang rec) lang'))))))))))
+
 (defn- dismiss! [{:keys [!poll set-state!]}]
   (js/clearTimeout @!poll)
   (remember! nil)
@@ -123,13 +177,14 @@
 (defn init
   "Mounts the Polku recording widget in the page and returns its controller object.
   Takes a ClojureScript map or a JavaScript object with `endpoint`, `screen`, `audio`,
-  `lang` and `frameInterval`. A repeated call returns the existing controller, which
-  makes it safe to call from code that hot-reloads."
+  `lang`, `languages` and `frameInterval`. A repeated call returns the existing controller,
+  which makes it safe to call from code that hot-reloads."
   [opts]
   (or (unchecked-get js/window "__polku")
-      (let [!state    (atom {:view :idle})
+      (let [config    (options opts)
+            !state    (atom {:view :idle :lang (:lang config) :languages (:languages config)})
             !widget   (atom nil)
-            ctx       {:config     (options opts)
+            ctx       {:config     config
                        :!state     !state
                        :!recorder  (atom nil)
                        :!poll      (atom nil)
@@ -137,16 +192,18 @@
                                      ([next] (set-state! next false))
                                      ([next heard-only?]
                                       ((:render @!widget) (swap! !state merge next) heard-only?)))}
-            w         (widget/mount {:start   #(start-recorder! (assoc ctx :host (:host @!widget)) nil)
-                                     :stop    #(stop-recorder! ctx %)
-                                     :cancel  #(cancel! ctx)
-                                     :dismiss #(dismiss! ctx)})
+            w         (widget/mount {:start    #(start-recorder! (assoc ctx :host (:host @!widget)) nil)
+                                     :stop     #(stop-recorder! ctx %)
+                                     :cancel   #(cancel! ctx)
+                                     :dismiss  #(dismiss! ctx)
+                                     :set-lang #(set-lang! ctx %)})
             ctx       (assoc ctx :host (:host w))
             api       #js {:start    (fn [overrides]
                                        (start-recorder! ctx (js->clj overrides :keywordize-keys true)))
                            :stop     (fn [note] (stop-recorder! ctx note))
                            :cancel   (fn [] (cancel! ctx))
                            :dismiss  (fn [] (dismiss! ctx))
+                           :setLang  (fn [lang] (set-lang! ctx lang))
                            :getState (fn [] (clj->js @!state))
                            :destroy  (fn []
                                        (cancel! ctx)
@@ -155,9 +212,10 @@
                                        (js-delete js/window "__polku"))}]
         (reset! !widget w)
         ((:render w) @!state false)
+        (check-languages! ctx)
         ;; A full page reload during an agent run resumes showing that run's status
         (when-let [pending (recall)]
-          ((:set-state! ctx) {:view :waiting :id pending :status "complete"})
+          ((:set-state! ctx) {:view :waiting :id pending :status "complete" :progress []})
           (poll! ctx pending))
         (unchecked-set js/window "__polku" api)
         api)))

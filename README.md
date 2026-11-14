@@ -23,6 +23,7 @@ screen frames              frames/*.jpg, audio.webm,
 "Stop & send"       ──▶    status: complete      ──▶    `polku wait` exits with a task brief
                                                         agent reads brief and frames,
                                                         edits source, app live-reloads
+widget lists steps  ◀──    progress in manifest  ◀──    `polku progress <id> -m "..."`
 widget shows        ◀──    status: done          ◀──    `polku done <id> -m "..."`
 the message
 ```
@@ -30,8 +31,8 @@ the message
 1. **Capture.** The widget asks for the microphone and for sharing the current tab. It records pointer positions, clicks, the element the pointer rests on, scrolls, navigation and input activity (lengths only, never typed text). Speech is transcribed in the browser with the Web Speech API, and each utterance is timestamped at the moment it began. Screen frames are JPEG stills taken when the picture changes and after each click. All events carry a millisecond offset `t` from the start of the recording, and frame files are named by the same offset.
 2. **Ingest.** `polku serve` listens on 127.0.0.1:4777, accepts requests from localhost origins and writes each session to `.polku/sessions/<id>/` in the directory it was started from.
 3. **Handoff.** `polku wait` blocks until a session is complete, claims it, writes the brief to `.polku/CURRENT_TASK.md` and prints it. The brief merges speech, clicks and pointer rests into one timeline and names the frame that shows each moment.
-4. **Change.** The agent edits the source and relies on the app's own live reload.
-5. **Report.** `polku done` stores a one-sentence message that the widget shows to the person.
+4. **Change.** The agent edits the source and relies on the app's own live reload. Early in a request the page often shows nothing new for a while, so the agent reports what it understood and each longer step with `polku progress`. The widget lists the steps, with the latest marked as in progress.
+5. **Report.** `polku done` stores a one-sentence message that the widget shows to the person. The agent writes progress and done messages in the language the person used.
 
 ## Try it with the demo
 
@@ -89,7 +90,9 @@ ClojureScript (with `packages/polku/src` on the source path, or the package as a
   (polku/init {:endpoint "http://localhost:4777"}))
 ```
 
-Options: `endpoint`, `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `getState` and `destroy`.
+Options: `endpoint`, `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language), `languages` (the speech languages offered in the widget, defaults to `lang` followed by the browser's preferred languages) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `setLang(tag)`, `getState` and `destroy`.
+
+The Web Speech API recognizes one language at a time and cannot detect it. In browsers that have `SpeechRecognition.available()`, the widget drops the languages it reports as unavailable. When more than one language remains, the recording panel shows a language selector. Switching restarts recognition in the new language, and the widget remembers the choice in localStorage for later recordings. Each speech event records the language it was recognized in, and the brief names it.
 
 ## CLI
 
@@ -97,6 +100,7 @@ Options: `endpoint`, `screen` and `audio` (both default to true), `lang` (speech
 polku serve [--port 4777] [--origin <url>]   start the ingest server
 polku wait [--timeout <s>]                   block until a session is ready, print its brief
 polku watch -- <cmd...>                      run <cmd> with the brief on stdin for each session
+polku progress [id] -m <text>                show the step the agent is on in the user's browser
 polku done [id] -m <text>                    finish a session and message the user
 polku summary [id]                           print a session's brief
 polku events [id] [--type <t>]               print raw events as JSON lines
@@ -128,6 +132,6 @@ npm run build        # shadow-cljs release → dist/client.js (browser) and dist
 
 ## Not built yet
 
-- **Local transcription.** Speech goes through the browser's Web Speech API, which in Chrome sends audio to Google. The raw `audio.webm` is stored, so a local Whisper pass on the server can replace it.
+- **Local transcription.** Speech goes through the browser's Web Speech API, which in Chrome sends audio to Google and needs the language chosen up front. The raw `audio.webm` is stored, so a local Whisper pass on the server can replace it, which would also detect the language and handle a mix of languages in one recording.
 - **Isolation.** The agent edits the working tree and the one dev database directly. Branchable databases and per-session environments from the spec are future work.
 - **Video.** Frames are stills rather than a continuous recording.
