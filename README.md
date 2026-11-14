@@ -68,7 +68,7 @@ npx polku watch -- claude -p --permission-mode acceptEdits
 
 ```sh
 npm install --save-dev polku     # from this repo: build packages/polku, then npm install --save-dev ../packages/polku
-npx polku init                   # installs .claude/skills/polku and ignores .polku/
+npx polku init                   # installs .claude/skills/polku, adds the MCP server to .mcp.json, ignores .polku/
 npx polku serve                  # alongside the app's dev server
 ```
 
@@ -101,8 +101,22 @@ polku done [id] -m <text>                    finish a session and message the us
 polku summary [id]                           print a session's brief
 polku events [id] [--type <t>]               print raw events as JSON lines
 polku list                                   list sessions
-polku init                                   install the Claude Code skill
+polku mcp                                    serve sessions as MCP tools over stdio
+polku init                                   install the Claude Code skill and the MCP server entry
 ```
+
+## MCP tools
+
+`polku mcp` is a Model Context Protocol server over stdio. It reads the same `.polku` directory as the other commands, so it needs to start in the app's directory. `polku init` registers it in the project's .mcp.json, and Claude Code asks once whether to trust it.
+
+| Tool | Returns |
+| --- | --- |
+| `get_context_summary` | The brief for a session: what the user typed and said, the timeline, and where the artifacts are |
+| `get_session_recording` | Screen frames as images, each labelled with its offset. `from_ms`, `to_ms` and `max_frames` choose which |
+| `get_interaction_events` | Raw events as JSON lines, filtered by `types`, `from_ms`, `to_ms` and `limit`. Pointer positions are left out unless `types` asks for `move` |
+| `list_sessions` | Sessions with status, duration, frame count and page |
+
+Every tool takes an optional `session_id` and defaults to the latest claimed session. The tools only read. Claiming a session and reporting it done stay with `polku wait` and `polku done`.
 
 ## Building the client
 
@@ -114,7 +128,6 @@ npm run build        # shadow-cljs release → dist/client.js (browser) and dist
 
 ## Not built yet
 
-- **`polku-mcp`.** The spec lists MCP tools (`get_session_recording`, `get_interaction_events`, `get_context_summary`). The CLI commands `summary` and `events` cover the same data for now.
 - **Local transcription.** Speech goes through the browser's Web Speech API, which in Chrome sends audio to Google. The raw `audio.webm` is stored, so a local Whisper pass on the server can replace it.
 - **Isolation.** The agent edits the working tree and the one dev database directly. Branchable databases and per-session environments from the spec are future work.
 - **Video.** Frames are stills rather than a continuous recording.

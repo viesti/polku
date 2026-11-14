@@ -6,6 +6,7 @@
             ["node:util" :as util]
             [clojure.string :as str]
             [polku.server.http :as http]
+            [polku.server.mcp :as mcp]
             [polku.server.store :as store]
             [polku.server.summary :as summary]))
 
@@ -23,7 +24,8 @@
   events [id]           Print the raw events of a session as JSON lines
       --type <t>        Only events of this type; repeatable
   list                  List sessions and their status
-  init                  Install the Claude Code skill and gitignore entry in this project
+  mcp                   Serve sessions to an agent as MCP tools over stdio
+  init                  Install the Claude Code skill, MCP server entry and gitignore entry in this project
 
 Common options:
       --dir <path>      Workspace directory for session artifacts (default .polku)
@@ -37,6 +39,9 @@ Common options:
    :message {:type "string" :short "m"}
    :type    {:type "string" :multiple true :default []}
    :help    {:type "boolean" :short "h"}})
+
+(def ^:private version
+  (.-version (js/JSON.parse (fs/readFileSync (path/join js/__dirname ".." "package.json") "utf8"))))
 
 (defn- fail! [message]
   (js/console.error (str "polku: " message))
@@ -125,6 +130,21 @@ Common options:
                                     ".polku/\n"))
       (println "added .polku/ to .gitignore"))))
 
+(defn- install-mcp-entry!
+  "Adds the Polku server to the project's .mcp.json, keeping the entries that are already there."
+  []
+  (let [file   (path/resolve ".mcp.json")
+        config (if (fs/existsSync file)
+                 (js->clj (js/JSON.parse (fs/readFileSync file "utf8")))
+                 {})]
+    (when-not (get-in config ["mcpServers" "polku"])
+      (fs/writeFileSync file (str (js/JSON.stringify
+                                   (clj->js (assoc-in config ["mcpServers" "polku"]
+                                                      {"command" "npx" "args" ["polku" "mcp"]}))
+                                   nil 2)
+                                  "\n"))
+      (println "added the polku server to .mcp.json"))))
+
 (def ^:private commands
   {"serve"   (fn [{:keys [root opts]}]
                (ensure-dirs! root)
@@ -161,7 +181,11 @@ Common options:
    "list"    (fn [{:keys [root]}]
                (doseq [m (store/list-sessions root)]
                  (println (str (:id m) "  " (.padEnd (:status m) 9) "  " (:url m)))))
-   "init"    (fn [_] (install-skill!))})
+   "mcp"     (fn [{:keys [root]}]
+               (mcp/serve {:root root :version version}))
+   "init"    (fn [_]
+               (install-skill!)
+               (install-mcp-entry!))})
 
 (defn main [& _]
   (let [^js parsed (util/parseArgs (clj->js {:allowPositionals true :options arg-spec}))
