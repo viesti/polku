@@ -284,7 +284,11 @@
                     (if (.-isFinal result)
                       (do (when (seq text)
                             (swap! !s update :buffer conj
-                                   {:t (get @heard-at i) :type "speech" :text text :confidence (.-confidence alt)}))
+                                   {:t          (get @heard-at i)
+                                    :type       "speech"
+                                    :text       text
+                                    :confidence (.-confidence alt)
+                                    :lang       (:speech-lang @!s)}))
                           (vswap! heard-at dissoc i))
                       (vswap! interim conj text))))
                 (on-update {:heard (str/join " " @interim)}))))
@@ -293,15 +297,18 @@
               (when (#{"not-allowed" "service-not-allowed" "network"} (.-error e))
                 (swap! !s assoc :recognizing? false)
                 (on-update {:speech false}))))
-      ;; Chrome ends recognition after a stretch of silence
+      ;; Chrome ends recognition after a stretch of silence, and `set-lang!` ends it on purpose
       (set! (.-onend rec)
             (fn [_]
               (when (:recognizing? @!s)
+                ;; Result indexes start from zero again in the new recognition session
+                (vreset! heard-at {})
+                (swap! !s assoc :speech-lang (.-lang rec))
                 (try (.start rec)
                      (catch :default _ (swap! !s assoc :recognizing? false))))))
       (try
         (.start rec)
-        (swap! !s assoc :recognition rec :recognizing? true)
+        (swap! !s assoc :recognition rec :recognizing? true :speech-lang lang)
         true
         (catch :default _ false)))
     false))
@@ -318,6 +325,15 @@
              (let [timer (js/setTimeout resolve 1500)]
                (set! (.-onend rec) (fn [_] (js/clearTimeout timer) (resolve nil)))
                (.stop rec))))))))
+
+(defn- set-lang!
+  "Switches speech recognition to `lang`. Speech already under way finishes in the previous language."
+  [{:keys [!s]} lang]
+  (when-let [^js rec (:recognition @!s)]
+    (set! (.-lang rec) lang)
+    ;; The `onend` handler restarts recognition, which picks up the new language
+    (when (:recognizing? @!s)
+      (.stop rec))))
 
 (defn- abort-speech! [!s]
   (swap! !s assoc :recognizing? false)
@@ -443,6 +459,7 @@
                                    :queue    (js/Promise.resolve nil)
                                    :timers   []
                                    :cleanups []}))]
-    {:start  (fn [flags] (start! ctx flags))
-     :stop   (fn [note] (stop! ctx note))
-     :cancel (fn [] (cancel! ctx))}))
+    {:start    (fn [flags] (start! ctx flags))
+     :stop     (fn [note] (stop! ctx note))
+     :cancel   (fn [] (cancel! ctx))
+     :set-lang (fn [lang] (set-lang! ctx lang))}))

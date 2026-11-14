@@ -73,7 +73,9 @@
       (when note
         ["Typed note:" "" (str "> " (str/replace note "\n" "\n> ")) ""])
       (when (seq speech)
-        ["Spoken (speech recognition output, which may contain mis-heard words):"
+        [(str "Spoken (speech recognition output in "
+              (str/join ", " (or (seq (distinct (keep :lang speech))) [(or (:lang m) "an unknown language")]))
+              ", which may contain mis-heard words):")
          ""
          (str "> " (str/join " " (map :text speech)))
          ""])

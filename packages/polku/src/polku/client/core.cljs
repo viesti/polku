@@ -5,6 +5,7 @@
             [polku.client.widget :as widget]))
 
 (def ^:private pending-key "polku:pending")
+(def ^:private lang-key "polku:lang")
 (def ^:private poll-ms 1500)
 
 (def ^:private defaults
@@ -27,15 +28,33 @@
   (try (js/sessionStorage.getItem pending-key)
        (catch :default _ nil)))
 
+(defn- remember-lang! [lang]
+  (try (js/localStorage.setItem lang-key lang)
+       (catch :default _ nil)))
+
+(defn- recall-lang []
+  (try (js/localStorage.getItem lang-key)
+       (catch :default _ nil)))
+
 (defn- options
-  "Normalizes a JavaScript options object or a ClojureScript map into the config map."
+  "Normalizes a JavaScript options object or a ClojureScript map into the config map.
+  `:languages` lists the speech languages the user can choose between. It defaults to `:lang`
+  followed by the browser's preferred languages."
   [opts]
-  (let [m    (if (or (nil? opts) (map? opts)) opts (js->clj opts :keywordize-keys true))
-        m    (cond-> m
-               (contains? m :frameInterval) (assoc :frame-interval (:frameInterval m)))
-        conf (merge defaults
-                    {:lang (or (not-empty js/navigator.language) "en-US")}
-                    (select-keys m [:endpoint :screen :audio :frame-interval :lang]))]
+  (let [m         (if (or (nil? opts) (map? opts)) opts (js->clj opts :keywordize-keys true))
+        m         (cond-> m
+                    (contains? m :frameInterval) (assoc :frame-interval (:frameInterval m)))
+        lang      (or (not-empty (:lang m)) (not-empty js/navigator.language) "en-US")
+        languages (vec (distinct (or (seq (:languages m))
+                                     (cons lang (js->clj (or js/navigator.languages #js []))))))
+        chosen    (recall-lang)
+        conf      (merge defaults
+                         (select-keys m [:endpoint :screen :audio :frame-interval])
+                         {:languages languages
+                          :lang      (cond
+                                       (some #{chosen} languages) chosen
+                                       (some #{lang} languages)   lang
+                                       :else                      (first languages))})]
     (update conf :endpoint str/replace #"/$" "")))
 
 (defn- start-recorder!
@@ -44,7 +63,7 @@
     (set-state! {:view :starting})
     (let [rec (recorder/create
                {:endpoint       (:endpoint config)
-                :lang           (:lang config)
+                :lang           (:lang @!state)
                 :frame-interval (:frame-interval config)
                 :ignore         host
                 :on-update      (fn [{:keys [heard] :as update}]
@@ -118,6 +137,14 @@
   (reset! !recorder nil)
   (set-state! {:view :idle}))
 
+(defn- set-lang!
+  "Makes `lang` the speech language for the current recording and the ones after it."
+  [{:keys [!recorder set-state!]} lang]
+  (remember-lang! lang)
+  (set-state! {:lang lang})
+  (when-let [rec @!recorder]
+    ((:set-lang rec) lang)))
+
 (defn- dismiss! [{:keys [!poll set-state!]}]
   (js/clearTimeout @!poll)
   (remember! nil)
@@ -126,13 +153,14 @@
 (defn init
   "Mounts the Polku recording widget in the page and returns its controller object.
   Takes a ClojureScript map or a JavaScript object with `endpoint`, `screen`, `audio`,
-  `lang` and `frameInterval`. A repeated call returns the existing controller, which
-  makes it safe to call from code that hot-reloads."
+  `lang`, `languages` and `frameInterval`. A repeated call returns the existing controller,
+  which makes it safe to call from code that hot-reloads."
   [opts]
   (or (unchecked-get js/window "__polku")
-      (let [!state    (atom {:view :idle})
+      (let [config    (options opts)
+            !state    (atom {:view :idle :lang (:lang config) :languages (:languages config)})
             !widget   (atom nil)
-            ctx       {:config     (options opts)
+            ctx       {:config     config
                        :!state     !state
                        :!recorder  (atom nil)
                        :!poll      (atom nil)
@@ -140,16 +168,18 @@
                                      ([next] (set-state! next false))
                                      ([next heard-only?]
                                       ((:render @!widget) (swap! !state merge next) heard-only?)))}
-            w         (widget/mount {:start   #(start-recorder! (assoc ctx :host (:host @!widget)) nil)
-                                     :stop    #(stop-recorder! ctx %)
-                                     :cancel  #(cancel! ctx)
-                                     :dismiss #(dismiss! ctx)})
+            w         (widget/mount {:start    #(start-recorder! (assoc ctx :host (:host @!widget)) nil)
+                                     :stop     #(stop-recorder! ctx %)
+                                     :cancel   #(cancel! ctx)
+                                     :dismiss  #(dismiss! ctx)
+                                     :set-lang #(set-lang! ctx %)})
             ctx       (assoc ctx :host (:host w))
             api       #js {:start    (fn [overrides]
                                        (start-recorder! ctx (js->clj overrides :keywordize-keys true)))
                            :stop     (fn [note] (stop-recorder! ctx note))
                            :cancel   (fn [] (cancel! ctx))
                            :dismiss  (fn [] (dismiss! ctx))
+                           :setLang  (fn [lang] (set-lang! ctx lang))
                            :getState (fn [] (clj->js @!state))
                            :destroy  (fn []
                                        (cancel! ctx)

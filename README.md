@@ -90,7 +90,9 @@ ClojureScript (with `packages/polku/src` on the source path, or the package as a
   (polku/init {:endpoint "http://localhost:4777"}))
 ```
 
-Options: `endpoint`, `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `getState` and `destroy`.
+Options: `endpoint`, `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language), `languages` (the speech languages offered in the widget, defaults to `lang` followed by the browser's preferred languages) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `setLang(tag)`, `getState` and `destroy`.
+
+The Web Speech API recognizes one language at a time and cannot detect it. When `languages` has more than one entry, the recording panel shows a language selector. Switching restarts recognition in the new language, and the widget remembers the choice in localStorage for later recordings. Each speech event records the language it was recognized in, and the brief names it.
 
 ## CLI
 
@@ -130,6 +132,6 @@ npm run build        # shadow-cljs release → dist/client.js (browser) and dist
 
 ## Not built yet
 
-- **Local transcription.** Speech goes through the browser's Web Speech API, which in Chrome sends audio to Google. The raw `audio.webm` is stored, so a local Whisper pass on the server can replace it.
+- **Local transcription.** Speech goes through the browser's Web Speech API, which in Chrome sends audio to Google and needs the language chosen up front. The raw `audio.webm` is stored, so a local Whisper pass on the server can replace it, which would also detect the language and handle a mix of languages in one recording.
 - **Isolation.** The agent edits the working tree and the one dev database directly. Branchable databases and per-session environments from the spec are future work.
 - **Video.** Frames are stills rather than a continuous recording.
