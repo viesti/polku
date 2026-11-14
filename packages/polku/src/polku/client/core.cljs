@@ -145,6 +145,30 @@
   (when-let [rec @!recorder]
     ((:set-lang rec) lang)))
 
+(defn- check-languages!
+  "Drops the languages that the browser's speech recognition reports as unavailable.
+  Browsers without `SpeechRecognition.available` keep the whole list, and so does a check
+  that finds no language available."
+  [{:keys [!state !recorder set-state!]}]
+  (let [^js recognition (or (unchecked-get js/window "SpeechRecognition")
+                            (unchecked-get js/window "webkitSpeechRecognition"))]
+    (when (and recognition (fn? (.-available recognition)))
+      (-> (js/Promise.all
+           (clj->js (for [tag (:languages @!state)]
+                      ;; The executor turns a synchronous throw into a rejection
+                      (-> (js/Promise. (fn [resolve _]
+                                         (resolve (.available recognition #js {:langs #js [tag]}))))
+                          (.then (fn [status] (when-not (= "unavailable" status) tag)))
+                          (.catch (fn [_] tag))))))
+          (.then (fn [tags]
+                   (let [usable (vec (remove nil? tags))
+                         lang   (:lang @!state)
+                         lang'  (if (some #{lang} usable) lang (first usable))]
+                     (when (and (seq usable) (not= usable (:languages @!state)))
+                       (set-state! {:languages usable :lang lang'})
+                       (when-let [rec (and (not= lang lang') @!recorder)]
+                         ((:set-lang rec) lang'))))))))))
+
 (defn- dismiss! [{:keys [!poll set-state!]}]
   (js/clearTimeout @!poll)
   (remember! nil)
@@ -188,6 +212,7 @@
                                        (js-delete js/window "__polku"))}]
         (reset! !widget w)
         ((:render w) @!state false)
+        (check-languages! ctx)
         ;; A full page reload during an agent run resumes showing that run's status
         (when-let [pending (recall)]
           ((:set-state! ctx) {:view :waiting :id pending :status "complete" :progress []})
