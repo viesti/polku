@@ -1,10 +1,12 @@
 (ns demo.app
-  (:require [polku.client.core :as polku]
+  (:require [demo.game :as game]
+            [polku.client.core :as polku]
             [uix.core :refer [$ defui]]
             [uix.dom]))
 
 (defui app []
-  ($ :main))
+  ($ :main
+     ($ game/game)))
 
 (defonce root
   (uix.dom/create-root (js/document.getElementById "app")))
