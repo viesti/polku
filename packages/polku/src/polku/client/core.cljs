@@ -85,10 +85,13 @@
                             (do (remember! nil) (set-state! {:view :done :message (.-message s)}))
 
                             :else
-                            (do (when (and (= :waiting (:view @!state))
-                                           (not= (.-status s) (:status @!state)))
-                                  (set-state! {:status (.-status s)}))
-                                (poll! ctx id)))))
+                            (let [status   (.-status s)
+                                  progress (mapv #(.-text ^js %) (or (.-progress s) #js []))]
+                              (when (and (= :waiting (:view @!state))
+                                         (not= [status progress]
+                                               [(:status @!state) (:progress @!state)]))
+                                (set-state! {:status status :progress progress}))
+                              (poll! ctx id)))))
                  ;; The server may be restarting, so the next poll tries again
                  (.catch (fn [_] (poll! ctx id)))))
            poll-ms)))
@@ -102,7 +105,7 @@
       (-> ((:stop rec) note)
           (.then (fn [id]
                    (remember! id)
-                   (set-state! {:view :waiting :id id :status "complete"})
+                   (set-state! {:view :waiting :id id :status "complete" :progress []})
                    (poll! ctx id)
                    id))
           (.catch (fn [^js err]
@@ -157,7 +160,7 @@
         ((:render w) @!state false)
         ;; A full page reload during an agent run resumes showing that run's status
         (when-let [pending (recall)]
-          ((:set-state! ctx) {:view :waiting :id pending :status "complete"})
+          ((:set-state! ctx) {:view :waiting :id pending :status "complete" :progress []})
           (poll! ctx pending))
         (unchecked-set js/window "__polku" api)
         api)))

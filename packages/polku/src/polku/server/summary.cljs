@@ -112,9 +112,17 @@
     "## What to do"
     ""
     "1. Read the frames that matter (they are images) to see what the user was looking at and pointing to."
-    (str "2. Change the application source to do what the user asked. The app is running with live "
-         "reload, so saved changes appear in the user's browser without a restart.")
-    "3. Check that the change compiled and the app still works."
-    (str "4. Report back to the user's browser with a one-sentence, non-technical message: "
+    (str "2. Tell the user what you understood they want, in one short sentence: "
+         "`npx polku progress " id " -m \"<your reading of the request>\"`. It appears in their browser "
+         "while you work.")
+    (str "3. Change the application source to do what the user asked. The app is running with live "
+         "reload, so saved changes appear in the user's browser without a restart. Before each step that "
+         "takes a while or that the user cannot see yet, such as a database change or a new API, report it "
+         "with `npx polku progress " id " -m \"<step>\"`. Report at least every 30 seconds or so, "
+         "but not every file edit.")
+    "4. Check that the change compiled and the app still works."
+    (str "5. Report back to the user's browser with a one-sentence, non-technical message: "
          "`npx polku done " id " -m \"<what changed>\"`.")
+    ""
+    "Write progress and done messages for a non-developer, in the language the user spoke or typed in."
     ""]))

@@ -32,7 +32,7 @@
                   (catch :default _ (throw (ex-info "invalid JSON" {:status 400}))))))))
 
 (defn- public-status [m]
-  (select-keys m [:id :status :message :counts]))
+  (select-keys m [:id :status :message :counts :progress]))
 
 (def ^:private routes
   [["GET" #"/health"

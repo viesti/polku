@@ -2,6 +2,7 @@
   "Draws the floating recording control inside a shadow root.")
 
 (def host-tag "polku-widget")
+(def ^:private max-steps 5)
 
 (def ^:private css "
 :host { all: initial; position: fixed; right: 16px; bottom: 16px; z-index: 2147483647;
@@ -26,6 +27,11 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 .primary { background: #111827; color: #fff; flex: 1; }
 .ghost { background: #f3f4f6; color: #111827; }
 .msg { margin: 8px 0 0; overflow-wrap: anywhere; }
+.steps { list-style: none; margin: 8px 0 0; padding: 0; overflow-wrap: anywhere; }
+.steps li { margin-top: 4px; padding-left: 18px; text-indent: -18px; }
+.steps .past { color: #6b7280; }
+.steps .now::before { content: ''; display: inline-block; width: 8px; height: 8px; margin: 0 10px 1px 0;
+  border-radius: 50%; background: #111827; animation: pulse 1.2s infinite; }
 .error { color: #b91c1c; }
 .spin { width: 12px; height: 12px; border: 2px solid #d1d5db; border-top-color: #111827;
   border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
@@ -78,6 +84,16 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
           (h "button" {:class "primary" :onclick (fn [_] (stop (take-note)))} "Stop & send")
           (h "button" {:class "ghost" :onclick (fn [_] (take-note) (cancel))} "Cancel")))))
 
+(defn- steps
+  "Lists the last few steps the agent reported, marking the latest as the one in progress."
+  [progress]
+  (when (seq progress)
+    (let [shown (take-last max-steps progress)]
+      (apply h "ul" {:class "steps"}
+             (concat (for [text (butlast shown)]
+                       (h "li" {:class "past"} (str "✓ " text)))
+                     [(h "li" {:class "now"} (last shown))])))))
+
 (defn- view [state {:keys [start dismiss] :as actions} !ui]
   (case (:view state)
     :idle      (h "button" {:class "pill" :title "Record a change request" :onclick (fn [_] (start))}
@@ -91,6 +107,7 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                      (if (= "claimed" (:status state))
                        "The agent is working on it…"
                        "Sent. Waiting for the agent…"))
+                  (steps (:progress state))
                   (h "div" {:class "row"}
                      (h "button" {:class "ghost" :onclick (fn [_] (dismiss))} "Hide")))
     :done      (h "div" {:class "panel"}
