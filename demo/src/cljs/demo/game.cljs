@@ -117,6 +117,33 @@
           (recur (inc x) x (conj acc {:tx x :ty y :open? false :items (chest-items x y)}))
           (recur (inc x) last acc))))))
 
+(def shop-w 7)
+(def shop-h 5)
+
+(def prices
+  {:torch 2 :rope 3 :bar 10 :potion 15 :ruby 50 :mirror 40})
+
+(defn- place-shop!
+  "Levels the ground under a shop at a random surface spot away from the spawn point
+  and clears trees around it."
+  [^js tiles ^js surface]
+  (let [mid (quot W 2)
+        x (loop []
+            (let [x (+ 20 (js/Math.floor (* (js/Math.random) (- W 40 shop-w))))]
+              (if (< (js/Math.abs (- (+ x (quot shop-w 2)) mid)) 25) (recur) x)))
+        floor (apply min (map #(aget surface %) (range x (+ x shop-w))))]
+    (doseq [tx (range (- x 3) (+ x shop-w 3)) ty (range H)
+            :when (#{trunk leaves} (aget tiles (idx tx ty)))]
+      (aset tiles (idx tx ty) air))
+    (doseq [tx (range x (+ x shop-w))]
+      (doseq [ty (range 0 H)]
+        (cond
+          (< ty floor) (aset tiles (idx tx ty) air)
+          (= ty floor) (aset tiles (idx tx ty) grass)
+          (< ty (+ floor 4)) (aset tiles (idx tx ty) dirt)))
+      (aset surface tx floor))
+    {:tx x :ty floor}))
+
 (defn generate []
   (let [tiles (js/Uint8Array. (* W H))
         surface (js/Int32Array. W)]
@@ -141,7 +168,8 @@
                           (> (js/Math.abs (- x (quot W 2))) 3))]
           (when plant? (plant-tree! tiles x s))
           (recur (inc x) (if plant? x last)))))
-    {:tiles tiles :surface surface :chests (place-chests tiles surface)}))
+    (let [shop (place-shop! tiles surface)]
+      {:tiles tiles :surface surface :shop shop :chests (place-chests tiles surface)})))
 
 (defn- box-hits? [tiles x y]
   (let [x0 (js/Math.floor (/ x T))
@@ -473,6 +501,58 @@
     (.fillText ctx text (- x cam-x) (- y cam-y)))
   (set! (.-globalAlpha ctx) 1))
 
+(defn- draw-shop [^js ctx {:keys [tx ty]} vw cam-x cam-y]
+  (let [w (* shop-w T)
+        h (* shop-h T)
+        sx (js/Math.round (- (* tx T) cam-x))
+        base (js/Math.round (- (* ty T) cam-y))
+        top (- base h)
+        rect (fn [color x y rw rh]
+               (set! (.-fillStyle ctx) color)
+               (.fillRect ctx (+ sx x) (+ top y) rw rh))]
+    (when (< (- w) sx (+ vw w))
+      (rect "#a0703c" 4 18 (- w 8) (- h 18))
+      (doseq [i (range 3 (/ (- h 18) 6))]
+        (rect "#8b5e30" 4 (+ 18 (* i 6)) (- w 8) 1))
+      (set! (.-fillStyle ctx) "#b33a2e")
+      (.beginPath ctx)
+      (.moveTo ctx (- sx 6) (+ top 22))
+      (.lineTo ctx (+ sx (/ w 2)) (- top 14))
+      (.lineTo ctx (+ sx w 6) (+ top 22))
+      (.closePath ctx)
+      (.fill ctx)
+      (rect "#4a2a12" 46 (- h 34) 20 34)
+      (rect "#e0b84a" 61 (- h 18) 3 3)
+      (rect "#4a2a12" 12 36 24 18)
+      (rect "#ffe9a8" 14 38 20 14)
+      (rect "#4a2a12" 23 38 2 14)
+      (rect "#4a2a12" 76 36 24 18)
+      (rect "#ffe9a8" 78 38 20 14)
+      (rect "#4a2a12" 87 38 2 14)
+      (rect "#3a2410" 30 20 52 14)
+      (set! (.-font ctx) "bold 11px system-ui, sans-serif")
+      (set! (.-textAlign ctx) "center")
+      (set! (.-fillStyle ctx) "#ffd54a")
+      (.fillText ctx "🪙 SHOP" (+ sx 56) (+ top 31)))))
+
+(defn- near-shop? [{:keys [x y]} {:keys [tx ty]}]
+  (let [sx (* tx T) base (* ty T)]
+    (and (< (- sx 8) (+ x player-w)) (< x (+ sx (* shop-w T) 8))
+         (< (- base (* shop-h T)) (+ y player-h)) (< y (+ base 8)))))
+
+(defn- sell [inventory id n]
+  (let [{:keys [count]} (first (filter #(= id (:id %)) inventory))
+        n (min n (or count 0))
+        earned (* n (prices id 0))]
+    (if (pos? n)
+      (-> (into [] (keep (fn [item]
+                           (cond
+                             (not= id (:id item)) item
+                             (> (:count item) n) (update item :count - n))))
+                inventory)
+          (add-items [(assoc (select-keys coin [:id :name :icon]) :count earned)]))
+      inventory)))
+
 (defn- spawn [{:keys [surface]}]
   (let [x (quot W 2)]
     {:x (+ (* x T) (/ (- T player-w) 2))
@@ -497,9 +577,44 @@
                ($ :span {:class "flex-1"} name)
                ($ :span {:class "font-mono tabular-nums"} count)))))))
 
+(defui shop-panel [{:keys [items on-sell]}]
+  (let [sellable (filter #(prices (:id %)) items)]
+    ($ :div {:class "absolute bottom-6 left-1/2 w-80 -translate-x-1/2 rounded-lg border-2 border-amber-700 bg-amber-950/90 p-4 text-sm text-amber-50 shadow-xl select-none"}
+       ($ :div {:class "mb-1 text-base font-bold"} "🪙 Shop")
+       ($ :div {:class "mb-3 text-amber-200/80"} "Sell your finds for gold coins.")
+       (if (empty? sellable)
+         ($ :div {:class "text-amber-200/70"} "You have nothing to sell yet.")
+         ($ :ul {:class "space-y-1"}
+            (for [{:keys [id icon name count]} sellable]
+              ($ :li {:key (str id) :class "flex items-center gap-2 rounded bg-white/10 px-2 py-1"}
+                 ($ :span {:class "text-base"} icon)
+                 ($ :span {:class "flex-1"} name " ×" count)
+                 ($ :span {:class "font-mono text-amber-300"} (prices id) " 🪙")
+                 ($ :button {:class "rounded bg-amber-600 px-2 py-0.5 font-semibold hover:bg-amber-500"
+                             :on-click #(do (.blur (.-currentTarget %)) (on-sell id 1))}
+                    "Sell")
+                 (when (> count 1)
+                   ($ :button {:class "rounded bg-amber-700 px-2 py-0.5 font-semibold hover:bg-amber-600"
+                               :on-click #(do (.blur (.-currentTarget %)) (on-sell id count))}
+                      "All")))))))))
+
 (defui game []
   (let [canvas-ref (use-ref nil)
-        [items set-items!] (use-state [])]
+        state-ref (use-ref nil)
+        [items set-items!] (use-state [])
+        [at-shop? set-at-shop!] (use-state false)
+        [shop-dist set-shop-dist!] (use-state nil)
+        on-sell (fn [id n]
+                  (when-let [state @state-ref]
+                    (let [before (:inventory @state)
+                          after (:inventory (swap! state update :inventory sell id n))]
+                      (when (not= before after)
+                        (let [{:keys [x y]} (:player @state)
+                              earned (- (reduce + (map :count (filter #(= :coin (:id %)) after)))
+                                        (reduce + (map :count (filter #(= :coin (:id %)) before))))]
+                          (swap! state update :popups conj
+                                 {:text (str "+" earned " 🪙") :x (+ x (/ player-w 2)) :y (- y 10) :life 90}))
+                        (set-items! after)))))]
     (use-effect
      (fn []
        (let [^js canvas @canvas-ref
@@ -507,6 +622,8 @@
              world (generate)
              state (atom {:player (spawn world) :keys #{} :particles []
                           :chests (:chests world) :inventory [] :popups []})
+             _ (reset! state-ref state)
+             shop (:shop world)
              raf (atom nil)
              last-t (atom nil)
              resize (fn []
@@ -546,6 +663,11 @@
                                             (< (js/Math.abs (:vx p)) 0.4) (assoc :facing side))))))
                            _ (swing! state (:tiles world) dt)
                            _ (some-> (open-chests! state) set-items!)
+                           _ (set-at-shop! (near-shop? player shop))
+                           _ (set-shop-dist! (js/Math.round
+                                              (/ (- (* T (+ (:tx shop) (/ shop-w 2)))
+                                                    (+ (:x player) (/ player-w 2)))
+                                                 T)))
                            {:keys [player particles chests popups]}
                            (swap! state #(-> %
                                              (update :particles step-particles dt)
@@ -555,6 +677,7 @@
                        (draw-sky ctx vw vh cam-x t)
                        (draw-hills ctx vw vh cam-x cam-y)
                        (draw-tiles ctx (:tiles world) (:surface world) vw vh cam-x cam-y)
+                       (draw-shop ctx shop vw cam-x cam-y)
                        (draw-chests ctx chests vw vh cam-x cam-y)
                        (draw-target ctx (:tiles world) player cam-x cam-y)
                        (draw-player ctx player cam-x cam-y)
@@ -585,5 +708,11 @@
     ($ :div {:class "fixed inset-0 overflow-hidden bg-sky-300"}
        ($ :canvas {:ref canvas-ref :class "block w-full h-full"})
        ($ :div {:class "absolute top-4 left-4 rounded-md bg-black/40 px-3 py-2 text-sm text-white select-none"}
-          "A D move · Space jump · mouse aims pickaxe · Shift or click to dig")
-       ($ inventory-panel {:items items}))))
+          ($ :div "A D move · Space jump · mouse aims pickaxe · Shift or click to dig")
+          (when (and shop-dist (not at-shop?))
+            ($ :div {:class "mt-1 text-amber-200"}
+               (str "🪙 Shop " (if (neg? shop-dist) "← " "") (js/Math.abs shop-dist) " tiles"
+                    (if (pos? shop-dist) " →" "")))))
+       ($ inventory-panel {:items items})
+       (when at-shop?
+         ($ shop-panel {:items items :on-sell on-sell})))))
