@@ -171,32 +171,32 @@
     (let [shop (place-shop! tiles surface)]
       {:tiles tiles :surface surface :shop shop :chests (place-chests tiles surface)})))
 
-(defn- box-hits? [tiles x y]
+(defn- box-hits? [tiles x y w h]
   (let [x0 (js/Math.floor (/ x T))
-        x1 (js/Math.floor (/ (+ x player-w -0.01) T))
+        x1 (js/Math.floor (/ (+ x w -0.01) T))
         y0 (js/Math.floor (/ y T))
-        y1 (js/Math.floor (/ (+ y player-h -0.01) T))]
+        y1 (js/Math.floor (/ (+ y h -0.01) T))]
     (some (fn [[tx ty]] (solid? (tile-at tiles tx ty)))
           (for [tx (range x0 (inc x1)) ty (range y0 (inc y1))] [tx ty]))))
 
-(defn- move-x [tiles {:keys [x y vx ground?] :as p} dx]
+(defn- move-x [tiles {:keys [x y vx ground? w h] :or {w player-w h player-h} :as p} dx]
   (let [nx (+ x dx)]
     (cond
-      (not (box-hits? tiles nx y)) (assoc p :x nx)
+      (not (box-hits? tiles nx y w h)) (assoc p :x nx)
       ;; walk up single-tile steps
-      (and ground? (not (box-hits? tiles nx (- y T))))
+      (and ground? (not (box-hits? tiles nx (- y T) w h)))
       (assoc p :x nx :y (- y T))
       (pos? dx)
-      (assoc p :x (- (* T (js/Math.floor (/ (+ nx player-w) T))) player-w 0.001) :vx 0)
+      (assoc p :x (- (* T (js/Math.floor (/ (+ nx w) T))) w 0.001) :vx 0)
       :else
       (assoc p :x (* T (inc (js/Math.floor (/ nx T)))) :vx (if (neg? vx) 0 vx)))))
 
-(defn- move-y [tiles {:keys [x y] :as p} dy]
+(defn- move-y [tiles {:keys [x y w h] :or {w player-w h player-h} :as p} dy]
   (let [ny (+ y dy)]
     (cond
-      (not (box-hits? tiles x ny)) (assoc p :y ny :ground? false)
+      (not (box-hits? tiles x ny w h)) (assoc p :y ny :ground? false)
       (pos? dy)
-      (assoc p :y (- (* T (js/Math.floor (/ (+ ny player-h) T))) player-h 0.001)
+      (assoc p :y (- (* T (js/Math.floor (/ (+ ny h) T))) h 0.001)
              :vy 0 :ground? true)
       :else
       (assoc p :y (* T (inc (js/Math.floor (/ ny T)))) :vy 0))))
@@ -253,13 +253,18 @@
 
 (defn- in-world? [tx ty] (and (< -1 tx W) (< -1 ty (- H 1))))
 
+(declare strike-enemies)
+
 (defn- swing!
-  "Advances the pickaxe swing and breaks the targeted tiles when Shift starts a new one."
+  "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
+  or breaks the targeted tile when it reaches none. Returns true when a struck enemy
+  dropped coins."
   [state ^js tiles dt]
   (let [{:keys [player keys mouse-down?]} @state
         left (max 0 (- (:swing player 0) dt))]
     (if (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight")))
-      (let [hits (filterv (fn [[tx ty]] (in-world? tx ty)) (dig-targets tiles player))
+      (let [struck (strike-enemies state)
+            hits (if struck [] (filterv (fn [[tx ty]] (in-world? tx ty)) (dig-targets tiles player)))
             debris (for [[tx ty] hits
                          :let [color (get-in palette [(aget tiles (idx tx ty)) 0])]
                          i (range 7)]
@@ -273,8 +278,9 @@
                           (assoc-in [:player :swing] swing-frames)
                           (assoc-in [:player :facing]
                                     (if (< (first (:aim-at player)) (first (hand player))) -1 1))
-                          (update :particles into debris))))
-      (swap! state assoc-in [:player :swing] left))))
+                          (update :particles into debris)))
+        (= struck :loot))
+      (do (swap! state assoc-in [:player :swing] left) false))))
 
 (defn- step-particles [ps dt]
   (into [] (comp (map (fn [p] (-> p
@@ -285,26 +291,87 @@
                  (filter #(pos? (:life %))))
         ps))
 
-(defn- draw-sky [^js ctx vw vh cam-x t]
-  (let [g (.createLinearGradient ctx 0 0 0 vh)]
-    (.addColorStop g 0 "#4f9fe6")
-    (.addColorStop g 1 "#c4e6ff")
-    (set! (.-fillStyle ctx) g)
-    (.fillRect ctx 0 0 vw vh))
-  (set! (.-fillStyle ctx) "#fff6c2")
+(def day-ms 180000)
+(def night-ms 180000)
+;; the first day starts in the morning rather than at sunrise
+(def start-ms 30000)
+
+(defn time-of-day
+  "Returns `:day?`, `:frac` (how far through the current day or night) and `:light`
+  (0 at night, 1 in full daylight) for page time `t` in milliseconds."
+  [t]
+  (let [p (mod (+ t start-ms) (+ day-ms night-ms))
+        day? (< p day-ms)
+        frac (if day? (/ p day-ms) (/ (- p day-ms) night-ms))
+        s (* (js/Math.sin (* js/Math.PI frac)) (if day? 1 -1))]
+    {:day? day? :frac frac :light (-> (+ 0.5 (* 2 s)) (max 0) (min 1))}))
+
+(defn- mix-rgb [a b w] (mapv #(+ %1 (* w (- %2 %1))) a b))
+
+(defn- rgb [[r g b]]
+  (str "rgb(" (js/Math.round r) "," (js/Math.round g) "," (js/Math.round b) ")"))
+
+(defn- disc [^js ctx color x y r]
+  (set! (.-fillStyle ctx) color)
   (.beginPath ctx)
-  (.arc ctx (- vw 160) 110 42 0 (* 2 js/Math.PI))
-  (.fill ctx)
-  (set! (.-fillStyle ctx) "rgba(255,255,255,0.85)")
-  (doseq [i (range 9)]
-    (let [span (+ vw 400)
-          cx (- (mod (- (* i 260) (* cam-x 0.2) (* t 0.01)) span) 200)
-          cy (+ 60 (* 90 (hash2 i 5)))
-          s (+ 0.7 (* 0.6 (hash2 i 9)))]
-      (doseq [[ox oy rx ry] [[0 0 60 18] [30 -10 36 18] [-26 -6 30 14]]]
-        (.beginPath ctx)
-        (.ellipse ctx (+ cx (* ox s)) (+ cy (* oy s)) (* rx s) (* ry s) 0 0 (* 2 js/Math.PI))
-        (.fill ctx)))))
+  (.arc ctx x y r 0 (* 2 js/Math.PI))
+  (.fill ctx))
+
+(defn- draw-sky
+  "Draws the sky behind everything already on the canvas, so the call order runs
+  from the nearest layer (clouds) to the farthest (the gradient)."
+  [^js ctx vw vh cam-x t {:keys [day? frac light]}]
+  (let [dawn (- 1 (js/Math.abs (- (* 2 light) 1)))
+        arc-x (* vw (+ 0.05 (* 0.9 frac)))
+        arc-y (- (* vh 0.45) (* vh 0.37 (js/Math.sin (* js/Math.PI frac))))]
+    (set! (.-globalCompositeOperation ctx) "destination-over")
+    (set! (.-fillStyle ctx) (str "rgba(255,255,255," (* 0.85 (+ 0.2 (* 0.8 light))) ")"))
+    (doseq [i (range 9)]
+      (let [span (+ vw 400)
+            cx (- (mod (- (* i 260) (* cam-x 0.2) (* t 0.01)) span) 200)
+            cy (+ 60 (* 90 (hash2 i 5)))
+            s (+ 0.7 (* 0.6 (hash2 i 9)))]
+        (doseq [[ox oy rx ry] [[0 0 60 18] [30 -10 36 18] [-26 -6 30 14]]]
+          (.beginPath ctx)
+          (.ellipse ctx (+ cx (* ox s)) (+ cy (* oy s)) (* rx s) (* ry s) 0 0 (* 2 js/Math.PI))
+          (.fill ctx))))
+    (if day?
+      (do (disc ctx (rgb (mix-rgb [255 246 194] [255 170 80] dawn)) arc-x arc-y 42)
+          (disc ctx (str "rgba(255,230,150," (* 0.25 (+ 0.4 dawn)) ")") arc-x arc-y 64))
+      (do (doseq [[dx dy r] [[-12 -8 7] [10 6 9] [-4 14 5] [14 -14 4]]]
+            (disc ctx "rgba(150,150,160,0.55)" (+ arc-x dx) (+ arc-y dy) r))
+          (disc ctx "#eeeedd" arc-x arc-y 34)
+          (disc ctx "rgba(200,210,255,0.12)" arc-x arc-y 60)))
+    (when (< light 1)
+      (doseq [i (range 140)]
+        (let [sx (mod (- (* (hash2 i 71) vw 1.3) (* cam-x 0.03)) vw)
+              sy (* (hash2 i 13) vh 0.7)
+              tw (+ 0.6 (* 0.4 (js/Math.sin (+ (/ t 400) (* 7 i)))))]
+          (set! (.-fillStyle ctx) (str "rgba(255,255,240," (* (- 1 light) tw) ")"))
+          (.fillRect ctx (js/Math.round sx) (js/Math.round sy)
+                     (if (< (hash2 i 5) 0.15) 2 1) (if (< (hash2 i 5) 0.15) 2 1)))))
+    (let [g (.createLinearGradient ctx 0 0 0 vh)
+          top (mix-rgb [10 14 40] [79 159 230] light)
+          bot (mix-rgb (mix-rgb [28 38 78] [196 230 255] light) [255 150 90] (* 0.6 dawn))]
+      (.addColorStop g 0 (rgb top))
+      (.addColorStop g 1 (rgb bot))
+      (set! (.-fillStyle ctx) g)
+      (.fillRect ctx 0 0 vw vh))
+    (set! (.-globalCompositeOperation ctx) "source-over")))
+
+(defn- draw-night
+  "Darkens what is already drawn by the darkness of the night, leaving a dim glow
+  around the player."
+  [^js ctx vw vh px py light]
+  (let [dark (* 0.72 (- 1 light))]
+    (when (pos? dark)
+      (let [g (.createRadialGradient ctx px py 30 px py 240)]
+        (.addColorStop g 0 (str "rgba(6,10,32," (* 0.3 dark) ")"))
+        (.addColorStop g 1 (str "rgba(6,10,32," dark ")"))
+        (set! (.-globalCompositeOperation ctx) "source-atop")
+        (set! (.-fillStyle ctx) g)
+        (.fillRect ctx 0 0 vw vh)
+        (set! (.-globalCompositeOperation ctx) "source-over")))))
 
 (defn- draw-hills [^js ctx vw vh cam-x cam-y]
   (doseq [[par color amp base] [[0.15 "#8fc7a5" 70 0.30] [0.35 "#6fb487" 45 0.36]]]
@@ -553,6 +620,161 @@
           (add-items [(assoc (select-keys coin [:id :name :icon]) :count earned)]))
       inventory)))
 
+(def slime-w 22)
+(def slime-h 16)
+(def max-slimes 10)
+(def slime-color "#4cc94c")
+
+(defn- cave-spot?
+  "Checks that a slime fits on a cave floor at tile `tx`, `ty`, well below the surface."
+  [tiles ^js surface tx ty]
+  (and (< 1 tx (- W 2))
+       (> ty (+ (aget surface tx) 6))
+       (every? #(= air (tile-at tiles % ty)) [tx (inc tx)])
+       (every? #(= air (tile-at tiles % (dec ty))) [tx (inc tx)])
+       (every? #(solid? (tile-at tiles % (inc ty))) [tx (inc tx)])))
+
+(defn- spawn-slime
+  "Returns a slime on a random cave floor 15 to 45 tiles to the side of the player, or nil."
+  [tiles surface {:keys [x y]}]
+  (let [ptx (js/Math.floor (/ x T))
+        pty (js/Math.floor (/ y T))]
+    (some (fn [_]
+            (let [side (if (< (js/Math.random) 0.5) -1 1)
+                  tx (+ ptx (* side (+ 15 (js/Math.floor (* 30 (js/Math.random))))))
+                  spots (filterv #(cave-spot? tiles surface tx %) (range (- pty 20) (+ pty 35)))
+                  ty (when (seq spots) (rand-nth spots))]
+              (when ty
+                {:x (+ (* tx T) 4) :y (- (* (inc ty) T) slime-h 0.01)
+                 :w slime-w :h slime-h :vx 0 :vy 0 :ground? true
+                 :hp 3 :flash 0 :hop (* 60 (js/Math.random))})))
+          (range 20))))
+
+(defn- step-slime [tiles {:keys [x hop ground?] :as s} player dt]
+  (let [dx (- (:x player) x)
+        dy (- (:y player) (:y s))
+        chase? (and (< (js/Math.abs dx) (* 18 T)) (< (js/Math.abs dy) (* 10 T)))
+        dir (if chase? (if (neg? dx) -1 1) (if (< (js/Math.random) 0.5) -1 1))
+        jump? (and ground? (<= hop 0))
+        s (cond-> (-> s
+                      (update :hop - dt)
+                      (update :flash #(max 0 (- % dt))))
+            jump? (assoc :vy (- -5 (* 2.5 (js/Math.random))) :vx (* dir (if chase? 2.4 1.4))
+                         :hop (+ 40 (* 50 (js/Math.random))))
+            (and ground? (not jump?)) (update :vx * 0.7))
+        vy (min max-fall (+ (:vy s) (* gravity dt)))
+        s (assoc s :vy vy)]
+    (as-> s s
+      (move-x tiles s (* (:vx s) dt))
+      (move-y tiles s (* vy dt)))))
+
+(defn- overlaps? [{:keys [x y]} s]
+  (and (< (:x s) (+ x player-w)) (< x (+ (:x s) slime-w))
+       (< (:y s) (+ y player-h)) (< y (+ (:y s) slime-h))))
+
+(defn- puff [{:keys [x y]} color n]
+  (for [i (range n)]
+    {:x (+ x (* slime-w (js/Math.random))) :y (+ y (* slime-h (js/Math.random)))
+     :vx (- (* 4 (js/Math.random)) 2) :vy (- (* -3 (js/Math.random)) 1)
+     :life (+ 25 (* 20 (js/Math.random))) :color color :i i}))
+
+(defn- step-enemies!
+  "Spawns slimes in caves at night, moves them, knocks the player back on contact and
+  removes them in daylight."
+  [state tiles surface light dt]
+  (swap! state
+         (fn [{:keys [player enemies spawn-in] :as st}]
+           (let [night? (< light 0.3)
+                 spawn-in (- (or spawn-in 0) dt)
+                 new (when (and night? (<= spawn-in 0) (< (count enemies) max-slimes))
+                       (spawn-slime tiles surface player))
+                 enemies (cond-> (mapv #(step-slime tiles % player dt) (or enemies []))
+                           new (conj new))
+                 vanish (if (> light 0.6) enemies [])
+                 enemies (if (> light 0.6) [] enemies)
+                 touching (when (<= (:hurt player 0) 0) (first (filter #(overlaps? player %) enemies)))]
+             (cond-> (assoc st
+                            :enemies enemies
+                            :spawn-in (if (<= spawn-in 0) 120 spawn-in)
+                            :particles (into (:particles st)
+                                             (mapcat #(puff % "rgba(200,255,200,0.8)" 8) vanish)))
+               true (update-in [:player :hurt] #(max 0 (- (or % 0) dt)))
+               touching (update :player assoc
+                                :vx (if (< (+ (:x player) (/ player-w 2))
+                                           (+ (:x touching) (/ slime-w 2))) -7 7)
+                                :vy -5 :hurt 50))))))
+
+(defn- strike-enemies
+  "Damages the slimes in front of the pickaxe. Returns nil when it reaches none,
+  `:loot` when a slime died and dropped coins, and `:hit` otherwise."
+  [state]
+  (let [{:keys [player enemies]} @state
+        [hx hy] (hand player)
+        [ax ay] (or (:aim-at player) [(+ hx (:facing player)) hy])
+        ad (max 0.001 (js/Math.hypot (- ax hx) (- ay hy)))
+        in-reach? (fn [{:keys [x y]}]
+                    (let [cx (- (+ x (/ slime-w 2)) hx)
+                          cy (- (+ y (/ slime-h 2)) hy)
+                          d (js/Math.hypot cx cy)]
+                      (and (<= d (+ reach 10))
+                           (or (< d 24)
+                               (> (/ (+ (* cx (- ax hx)) (* cy (- ay hy))) (* d ad)) 0.55)))))
+        hit-idx (set (keep-indexed (fn [i e] (when (in-reach? e) i)) enemies))]
+    (when (seq hit-idx)
+      (let [hit (mapv (fn [i e]
+                        (if (hit-idx i)
+                          (assoc e :hp (dec (:hp e)) :flash 10 :vy -4
+                                 :vx (if (< (+ (:x e) (/ slime-w 2)) hx) -4 4))
+                          e))
+                      (range) enemies)
+            dead (filter #(<= (:hp %) 0) hit)
+            coins (reduce + (map (fn [_] (+ 2 (js/Math.floor (* 4 (js/Math.random))))) dead))]
+        (swap! state
+               (fn [st]
+                 (cond-> (-> st
+                             (assoc :enemies (filterv #(pos? (:hp %)) hit))
+                             (update :particles into
+                                     (mapcat #(puff % slime-color (if (pos? (:hp %)) 4 14)) hit)))
+                   (pos? coins)
+                   (-> (update :inventory add-items
+                               [(assoc (select-keys coin [:id :name :icon]) :count coins)])
+                       (update :popups conj
+                               (let [{:keys [x y]} (first dead)]
+                                 {:text (str "+" coins " 🪙") :x (+ x (/ slime-w 2)) :y (- y 6)
+                                  :life 90}))))))
+        (if (pos? coins) :loot :hit)))))
+
+(defn- draw-enemies [^js ctx enemies t vw vh cam-x cam-y]
+  (doseq [{:keys [x y vy flash ground?]} enemies
+          :let [sx (js/Math.round (- x cam-x))
+                sy (js/Math.round (- y cam-y))]
+          :when (and (< -40 sx (+ vw 40)) (< -40 sy (+ vh 40)))]
+    (let [squash (cond (not ground?) (max -3 (min 3 (* -0.5 vy)))
+                       :else (* 1.5 (js/Math.sin (/ t 120))))
+          h (+ slime-h squash)
+          w (- slime-w squash)
+          bx (+ sx (/ (- slime-w w) 2))
+          by (- (+ sy slime-h) h)]
+      (set! (.-fillStyle ctx) (if (pos? flash) "#ffffff" slime-color))
+      (.beginPath ctx)
+      (.roundRect ctx bx by w h #js [9 9 3 3])
+      (.fill ctx)
+      (set! (.-fillStyle ctx) "rgba(255,255,255,0.45)")
+      (.fillRect ctx (+ bx 4) (+ by 3) 4 3)
+      (set! (.-fillStyle ctx) "#14321a")
+      (.fillRect ctx (+ bx 6) (+ by 6) 3 4)
+      (.fillRect ctx (+ bx w -9) (+ by 6) 3 4))))
+
+(defn- draw-eyes
+  "Draws glowing eyes over the darkness so slimes outside the player's light are visible."
+  [^js ctx enemies light cam-x cam-y]
+  (when (< light 1)
+    (set! (.-fillStyle ctx) (str "rgba(210,255,120," (* 0.9 (- 1 light)) ")"))
+    (doseq [{:keys [x y]} enemies
+            :let [sx (js/Math.round (- x cam-x)) sy (js/Math.round (- y cam-y))]]
+      (.fillRect ctx (+ sx 6) (+ sy 6) 3 3)
+      (.fillRect ctx (+ sx slime-w -9) (+ sy 6) 3 3))))
+
 (defn- spawn [{:keys [surface]}]
   (let [x (quot W 2)]
     {:x (+ (* x T) (/ (- T player-w) 2))
@@ -661,29 +883,40 @@
                                               side (if (< (first aim) (first (hand p))) -1 1)]
                                           (cond-> (assoc p :aim-at aim)
                                             (< (js/Math.abs (:vx p)) 0.4) (assoc :facing side))))))
-                           _ (swing! state (:tiles world) dt)
+                           tod (time-of-day t)
+                           _ (when (swing! state (:tiles world) dt)
+                               (set-items! (:inventory @state)))
+                           _ (step-enemies! state (:tiles world) (:surface world) (:light tod) dt)
                            _ (some-> (open-chests! state) set-items!)
                            _ (set-at-shop! (near-shop? player shop))
                            _ (set-shop-dist! (js/Math.round
                                               (/ (- (* T (+ (:tx shop) (/ shop-w 2)))
                                                     (+ (:x player) (/ player-w 2)))
                                                  T)))
-                           {:keys [player particles chests popups]}
+                           {:keys [player particles chests popups enemies]}
                            (swap! state #(-> %
                                              (update :particles step-particles dt)
                                              (update :popups step-popups dt)))]
                        (.setTransform ctx dpr 0 0 dpr 0 0)
                        (set! (.-imageSmoothingEnabled ctx) false)
-                       (draw-sky ctx vw vh cam-x t)
+                       (.clearRect ctx 0 0 vw vh)
                        (draw-hills ctx vw vh cam-x cam-y)
                        (draw-tiles ctx (:tiles world) (:surface world) vw vh cam-x cam-y)
                        (draw-shop ctx shop vw cam-x cam-y)
                        (draw-chests ctx chests vw vh cam-x cam-y)
                        (draw-target ctx (:tiles world) player cam-x cam-y)
-                       (draw-player ctx player cam-x cam-y)
-                       (draw-pickaxe ctx player cam-x cam-y)
+                       (draw-enemies ctx enemies t vw vh cam-x cam-y)
+                       (when (even? (js/Math.floor (/ (:hurt player 0) 4)))
+                         (draw-player ctx player cam-x cam-y)
+                         (draw-pickaxe ctx player cam-x cam-y))
                        (draw-particles ctx particles cam-x cam-y)
                        (draw-depth ctx (:surface world) vw vh cam-y)
+                       (draw-night ctx vw vh
+                                   (- (+ (:x player) (/ player-w 2)) cam-x)
+                                   (- (+ (:y player) (/ player-h 2)) cam-y)
+                                   (:light tod))
+                       (draw-sky ctx vw vh cam-x t tod)
+                       (draw-eyes ctx enemies (:light tod) cam-x cam-y)
                        (draw-popups ctx popups cam-x cam-y)
                        (reset! raf (js/requestAnimationFrame frame))))]
          (resize)
@@ -708,7 +941,7 @@
     ($ :div {:class "fixed inset-0 overflow-hidden bg-sky-300"}
        ($ :canvas {:ref canvas-ref :class "block w-full h-full"})
        ($ :div {:class "absolute top-4 left-4 rounded-md bg-black/40 px-3 py-2 text-sm text-white select-none"}
-          ($ :div "A D move · Space jump · mouse aims pickaxe · Shift or click to dig")
+          ($ :div "A D move · Space jump · mouse aims pickaxe · Shift or click to dig or hit")
           (when (and shop-dist (not at-shop?))
             ($ :div {:class "mt-1 text-amber-200"}
                (str "🪙 Shop " (if (neg? shop-dist) "← " "") (js/Math.abs shop-dist) " tiles"
