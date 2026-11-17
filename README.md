@@ -9,7 +9,8 @@ This repository is a local proof of concept. Design documents are numbered in th
 | Path | Contents |
 | --- | --- |
 | `packages/polku` | The `polku` npm package, written in ClojureScript under src: the browser client (compiled to an ES module) and the ingest server with its CLI (compiled to a Node script). The compiled package has no runtime dependencies |
-| `demo` | A blank Clojure and ClojureScript web app that links the client, for trying the loop |
+| `demo` | A blank Clojure and ClojureScript web app that links the client, for trying the loop (see [demo/README.md](demo/README.md)) |
+| `examples` | Complete copies of the demo app with what an agent built in them through Polku (see [Examples](#examples)) |
 
 ## How the loop works
 
@@ -28,13 +29,15 @@ widget shows        ◀──    status: done          ◀──    `polku done 
 the message
 ```
 
-1. **Capture.** The widget asks for the microphone and for sharing the current tab. It records pointer positions, clicks, the element the pointer rests on, scrolls, navigation and input activity (lengths only, never typed text). Speech is transcribed in the browser with the Web Speech API, and each utterance is timestamped at the moment it began. Screen frames are JPEG stills taken when the picture changes and after each click. All events carry a millisecond offset `t` from the start of the recording, and frame files are named by the same offset.
+1. **Capture.** The widget asks for the microphone and for sharing the current tab. It records pointer positions, clicks, the element the pointer rests on, scrolls, window resizes, navigation and input activity (lengths only, never typed text). Pointer coordinates are relative to the viewport, like the frames. Speech is transcribed in the browser with the Web Speech API, and each utterance is timestamped at the moment it began. Screen frames are JPEG stills taken when the picture changes and after each click. All events carry a millisecond offset `t` from the start of the recording, and frame files are named by the same offset.
 2. **Ingest.** `polku serve` listens on 127.0.0.1:4777, accepts requests from localhost origins and writes each session to `.polku/sessions/<id>/` in the directory it was started from.
 3. **Handoff.** `polku wait` blocks until a session is complete, claims it, writes the brief to `.polku/CURRENT_TASK.md` and prints it. The brief merges speech, clicks and pointer rests into one timeline and names the frame that shows each moment.
-4. **Change.** The agent edits the source and relies on the app's own live reload. Early in a request the page often shows nothing new for a while, so the agent reports its plan, each part of the work it starts and each decision the person will see with `polku progress`. Problems in its own work are not reported. The widget lists the steps, with the latest marked as in progress.
+4. **Change.** The agent edits the source and relies on the app's own live reload. When a request is about a place, a size or an order on the page, the agent also reads the pointer path around the words that describe it, since a gesture such as circling a gap shows only there. Conventions fill in what the gesture leaves open. Early in a request the page often shows nothing new for a while, so the agent reports its plan, each part of the work it starts and each decision the person will see with `polku progress`. Problems in its own work are not reported. The widget lists the steps, with the latest marked as in progress.
 5. **Report.** `polku done` stores a one-sentence message that the widget shows to the person. The agent writes progress and done messages in the language the person used.
 
 ## Try it with the demo
+
+The same instructions are in [demo/README.md](demo/README.md).
 
 Requirements: Node 20+, a JDK, the Clojure CLI, and Docker. The demo runs PostgreSQL in a container on port 5433 (demo/docker-compose.yml).
 
@@ -64,6 +67,20 @@ To run the agent headless instead, with one fresh `claude -p` run per request:
 ```sh
 npx polku watch -- claude -p --permission-mode acceptEdits
 ```
+
+## Examples
+
+The examples directory holds apps that an agent built from the blank demo through recorded requests. Each one is a complete copy of the demo app, so it can be run, changed through Polku or rewritten without affecting the demo or the other examples.
+
+| Example | What it is |
+| --- | --- |
+| [mood-game](examples/mood-game) | A small game in which everyday activities change a character's mood |
+| [terraria-clone](examples/terraria-clone) | A side-scrolling 2D sandbox game with digging, caves, chests, a shop and slimes |
+| [shopping-list](examples/shopping-list) | Shopping lists with icons per item, stored in PostgreSQL |
+
+Run an example the same way as the demo, from its own directory. They all use ports 3000, 4777 and 5433, so run one at a time.
+
+The demo and each example carry their own copy of the Polku skill in .claude/skills/polku. After changing packages/polku/skill/SKILL.md, run `npx polku init` in each of them, or copy the file over.
 
 ## Adding Polku to another app
 

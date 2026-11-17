@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Opens the app in the default browser once the backend answers and the first frontend build is done.
+# Set NO_OPEN=1 to skip it.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+[ -n "${NO_OPEN:-}" ] && exit 0
+
+URL="http://localhost:${PORT:-3000}"
+
+for _ in $(seq 1 180); do
+  if curl -sf "$URL/api/health" >/dev/null && grep -q 'Build completed' .dev.log 2>/dev/null; then
+    if command -v open >/dev/null; then open "$URL"; else xdg-open "$URL"; fi
+    echo "Opened $URL"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "The app did not come up within three minutes; open $URL yourself once it has." >&2

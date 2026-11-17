@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "polku": {
+      "command": "npx",
+      "args": [
+        "polku",
+        "mcp"
+      ]
+    }
+  }
+}

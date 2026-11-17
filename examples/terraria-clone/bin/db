@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Controls the demo's PostgreSQL container, which listens on localhost:5433.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case "${1:-start}" in
+  start)
+    docker compose up -d --wait db
+    echo "PostgreSQL running on localhost:5433, database demo"
+    ;;
+  stop)
+    docker compose stop db
+    ;;
+  psql)
+    shift
+    exec docker compose exec db psql -U demo demo "$@"
+    ;;
+  *)
+    echo "usage: bin/db [start|stop|psql]" >&2
+    exit 1
+    ;;
+esac

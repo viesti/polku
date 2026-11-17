@@ -1,0 +1,27 @@
+{
+  "name": "polku-example-mood-game",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm --prefix ../../packages/polku install && npm --prefix ../../packages/polku run build",
+    "db": "bin/db start",
+    "db:stop": "bin/db stop",
+    "cljs": "shadow-cljs watch app",
+    "css": "tailwindcss -i src/css/app.css -o resources/public/css/app.css --watch=always",
+    "api": "clojure -M:dev",
+    "polku": "polku serve",
+    "agent": "claude \"Use the polku skill: start waiting for recordings and implement each one as it arrives.\"",
+    "dev": "bin/db start && concurrently --kill-others-on-fail -n api,cljs,css,polku,open -c blue,green,magenta,yellow,gray npm:api npm:cljs npm:css npm:polku npm:open 2>&1 | tee .dev.log",
+    "open": "bin/open-when-ready"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.5",
+    "concurrently": "^10.0.7",
+    "polku": "file:../../packages/polku",
+    "shadow-cljs": "^3.5.14",
+    "tailwindcss": "^4.3.5"
+  }
+}
