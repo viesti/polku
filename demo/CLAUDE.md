@@ -2,6 +2,8 @@
 
 This app starts as a blank page. A person describes what they want through the Polku widget in the browser, and you build it. Run the `/polku` skill to start waiting for their requests.
 
+Build only from what the person records. The ../examples directory holds other apps built this way; do not read, search or copy from it, even when a request resembles one of them.
+
 The person watches the browser at http://localhost:3000. Every change has to reach that page through live reload, without restarting the dev processes.
 
 ## Stack
