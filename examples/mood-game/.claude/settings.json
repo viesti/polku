@@ -1,5 +1,19 @@
 {
   "permissions": {
-    "blockReadsOutsideWorkingDirectories": true
+    "blockReadsOutsideWorkingDirectories": true,
+    "allow": [
+      "Bash(npx polku *)",
+      "Bash(curl -s localhost:3000*)",
+      "Bash(curl -s -X * localhost:3000*)",
+      "Bash(curl -s localhost:4777*)",
+      "Bash(curl -s -X * localhost:4777*)",
+      "Bash(brepl *)",
+      "Bash(sleep *)",
+      "Bash(grep *)",
+      "Bash(tail *)",
+      "Bash(bin/db *)",
+      "mcp__polku",
+      "mcp__chrome-devtools"
+    ]
   }
 }

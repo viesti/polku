@@ -29,7 +29,7 @@ The person watches the browser at http://localhost:3000. Every change has to rea
 - **SQL queries** are picked up by `(user/reset)` too.
 - **Migrations** run on every system start, so `(user/reset)` applies new files. `(user/migrate)` applies them without a restart.
 
-Check an API change with `curl -s localhost:3000/api/...` before reporting it done.
+Check an API change with `curl -s localhost:3000/api/...` before reporting it done. Commands that name a path outside this directory as an argument, even `curl -o /dev/null`, stop for a permission prompt that the person in the browser cannot see, so keep files and output inside this directory. Redirections such as `2>/dev/null` are fine.
 
 ## Conventions
 

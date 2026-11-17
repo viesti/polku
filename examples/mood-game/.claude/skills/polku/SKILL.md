@@ -45,6 +45,7 @@ The user watches the page while you work, and early in a request the page often 
 
 ## Notes
 
+- Edit source files with the Edit and Write tools, not with shell commands such as `sed -i`. A shell edit can stop for a permission prompt in this terminal, and the user, who watches only the browser, waits without knowing why.
 - Speech recognition mis-hears words. Prefer the reading that fits the frames and the app.
 - If a request is ambiguous, pick the most likely reading, implement it, and state the assumption in the `done` message. The user answers by recording again.
 - The MCP tools `get_context_summary` and `get_interaction_events` return the brief and the raw events, such as the full pointer path with `types: ["move"]`. Without the MCP server, `npx polku summary [id]` and `npx polku events [id] --type move` print the same.
