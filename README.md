@@ -4,6 +4,10 @@ Polku lets someone using a running web app say what they want changed, and hands
 
 This repository is a local proof of concept. Design documents are numbered in the doc directory, starting with the original specification, [01-polku-proof-of-concept.md](doc/01-polku-proof-of-concept.md).
 
+Check out the demo, since the idea is quite visual
+
+https://github.com/user-attachments/assets/57520004-a81b-447e-ab41-f080f832a8df
+
 ## Layout
 
 | Path | Contents |
