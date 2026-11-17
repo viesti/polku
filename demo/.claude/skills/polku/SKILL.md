@@ -14,11 +14,22 @@ The person is usually a product owner or business user, not a developer. They wa
 1. Start `npx polku wait` as a background command. It blocks until a recording is ready, then prints a task brief and exits. Do not poll; you are notified when it exits.
 2. When it exits, read its output. The brief contains what the user typed or said, a timeline of clicks and pointer rests with the element under the pointer, and paths to screen frames.
 3. Look at the screen at the moments the timeline points to. With the Polku MCP server connected, call `get_session_recording` (narrow it with `from_ms` and `to_ms`); otherwise read the JPEG files named in the brief. The last frame shows the page as the user left it. Words like "this", "here" or "that button" refer to the element under the pointer at that moment in the timeline.
-4. Once you have decided how to do it, tell the user your plan in one or two short sentences: `npx polku progress <id> -m "Adding a table of orders under a heading, newest orders first."` Include the choices they left open, such as what an enemy looks like or how it moves, because they cannot see those until the end. The message appears in the widget before anything on the page has changed, and lets them see early when you have misread them.
-5. Make the change in the application source. Follow the project's own instructions (CLAUDE.md) for where code lives and how reload works. Keep the change as small as the request; do not restart dev processes unless reload cannot pick the change up. Report progress as you go (see below).
-6. Check that the change compiled and that the app still loads.
-7. Tell the user what happened in one plain sentence: `npx polku done <id> -m "Added a title to the page."` The message appears in the widget in their browser. If you could not do what they asked, or had to guess, say that in the message instead.
-8. Go back to step 1.
+4. When the request involves a position, a size, an area or an order on the page, read the pointer path around the words that describe it (see "Reading the pointer" below) before you decide.
+5. Once you have decided how to do it, tell the user your plan in one or two short sentences: `npx polku progress <id> -m "Adding a table of orders under a heading, newest orders first."` Include the choices they left open, such as what an enemy looks like or how it moves, because they cannot see those until the end. The message appears in the widget before anything on the page has changed, and lets them see early when you have misread them.
+6. Make the change in the application source. Follow the project's own instructions (CLAUDE.md) for where code lives and how reload works. Keep the change as small as the request; do not restart dev processes unless reload cannot pick the change up. Report progress as you go (see below).
+7. Check that the change compiled and that the app still loads.
+8. Tell the user what happened in one plain sentence: `npx polku done <id> -m "Added a title to the page."` The message appears in the widget in their browser. If you could not do what they asked, or had to guess, say that in the message instead.
+9. Go back to step 1.
+
+## Reading the pointer
+
+The brief lists clicks and pointer rests, which name the element the user meant. A gesture that points at a place rather than an element shows only in the full pointer path: circling a gap between two elements, tracing the outline of an area, sweeping along a row, or moving from one spot to another while saying "move it from here to there".
+
+- Find the words that refer to a place ("here", "about here", "next to this", "between these", "this big", "over there") and their time in the timeline. Read the move events from about a second before to a second after: `get_interaction_events` with `types: ["move"]` and `from_ms`/`to_ms`, or `npx polku events <id> --type move` and keep the lines whose `t` falls in that window.
+- Map the coordinates onto the frame from the same moment. Note which elements the path circles, which edges it stays inside, and where it starts and ends. A tight loop marks a point, a rectangle-like path marks an area, and a path between two elements marks a gap or an insertion point.
+- Check the path against the convention for that kind of element. Conventions are still the right default. Use one to fill in what the gesture leaves open (exact spacing, alignment, how the element looks), and use one when the path is too scattered to read.
+- When the path and the convention disagree, follow the path and mention the placement in the plan message, so the user can correct you early if you misread the gesture.
+- When you placed something by convention because the path did not settle it, say so in the `done` message.
 
 ## Reporting progress
 
