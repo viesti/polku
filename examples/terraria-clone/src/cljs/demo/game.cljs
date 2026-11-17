@@ -22,6 +22,10 @@
 (def max-fall 11)
 (def swing-frames 14)
 (def reach (* 4.5 T))
+(def max-hp 10)
+;; 60 frames a second, so health refills from 0 to `max-hp` in 20 seconds
+(def regen (/ max-hp (* 20 60)))
+(def potion-heal 5)
 
 (defn- hash2 [x y]
   (let [h (+ (js/Math.imul x 374761393) (js/Math.imul y 668265263))
@@ -702,7 +706,8 @@
                touching (update :player assoc
                                 :vx (if (< (+ (:x player) (/ player-w 2))
                                            (+ (:x touching) (/ slime-w 2))) -7 7)
-                                :vy -5 :hurt 50))))))
+                                :vy -5 :hurt 50
+                                :hp (max 0 (dec (:hp player max-hp)))))))))
 
 (defn- strike-enemies
   "Damages the slimes in front of the pickaxe. Returns nil when it reaches none,
@@ -779,7 +784,48 @@
   (let [x (quot W 2)]
     {:x (+ (* x T) (/ (- T player-w) 2))
      :y (- (* T (aget surface x)) player-h 1)
-     :vx 0 :vy 0 :facing 1 :walked 0 :ground? false :swing 0}))
+     :vx 0 :vy 0 :facing 1 :walked 0 :ground? false :swing 0 :hp max-hp}))
+
+(defn- drink-potion
+  "Uses one Healing Potion from the inventory to restore `potion-heal` hit points.
+  Leaves the state unchanged when health is full or no potion is left."
+  [{:keys [player inventory] :as st}]
+  (let [potion (first (filter #(= :potion (:id %)) inventory))]
+    (if (and potion (< (:hp player) max-hp))
+      (-> st
+          (update-in [:player :hp] #(min max-hp (+ % potion-heal)))
+          (assoc :inventory (into [] (keep #(cond (not= :potion (:id %)) %
+                                                  (> (:count %) 1) (update % :count dec)))
+                                  inventory))
+          (update :popups conj {:text (str "+" potion-heal " ❤") :x (+ (:x player) (/ player-w 2))
+                                :y (- (:y player) 10) :life 90}))
+      st)))
+
+(defui health-bar [{:keys [hp]}]
+  ($ :div {:class "absolute top-4 left-4 w-56 rounded-md bg-black/40 px-3 py-2 text-sm text-white select-none"}
+     ($ :div {:class "mb-1 flex items-center justify-between"}
+        ($ :span {:class "font-semibold"} "❤ Health")
+        ($ :span {:class "font-mono tabular-nums"} (js/Math.floor hp) " / " max-hp))
+     ($ :div {:class "h-3 w-full overflow-hidden rounded-sm bg-red-950/80"}
+        ($ :div {:class "h-full bg-red-500 transition-[width] duration-150"
+                 :style {:width (str (* 100 (/ hp max-hp)) "%")}}))
+     ($ :div {:class "mt-1 text-xs text-white/60"} "M menu")))
+
+(defui menu-panel [{:keys [on-close]}]
+  ($ :div {:class "absolute inset-0 flex items-center justify-center bg-black/50 select-none"
+           :on-click on-close}
+     ($ :div {:class "w-96 rounded-lg bg-slate-900/95 p-5 text-sm text-white shadow-xl"
+              :on-click #(.stopPropagation %)}
+        ($ :div {:class "mb-3 text-lg font-bold"} "Menu")
+        ($ :div {:class "mb-2 font-semibold text-white/80"} "How to play")
+        ($ :ul {:class "space-y-1 text-white/90"}
+           ($ :li "A and D move, Space jumps")
+           ($ :li "The mouse aims the pickaxe")
+           ($ :li "Shift or click digs or hits slimes")
+           ($ :li "H drinks a Healing Potion (+" potion-heal " health), or click it in your items")
+           ($ :li "Slimes come out in the caves at night")
+           ($ :li "Find the shop on the surface to sell your finds"))
+        ($ :div {:class "mt-4 text-xs text-white/60"} "Press M again to close"))))
 
 (defn- typing? [^js e]
   (let [tag (some-> e .-target .-tagName)]
@@ -787,14 +833,20 @@
 
 (def game-keys #{"KeyA" "KeyD" "Space" "ShiftLeft" "ShiftRight"})
 
-(defui inventory-panel [{:keys [items]}]
+(defui inventory-panel [{:keys [items on-drink]}]
   ($ :div {:class "absolute top-4 right-4 w-60 rounded-md bg-black/50 p-3 text-sm text-white select-none"}
      ($ :div {:class "mb-2 font-semibold tracking-wide"} "Items")
      (if (empty? items)
        ($ :div {:class "text-white/70"} "Nothing yet. Dig into caves to find chests.")
        ($ :ul {:class "space-y-1"}
-          (for [{:keys [id icon name count]} items]
-            ($ :li {:key (str id) :class "flex items-center gap-2 rounded bg-white/10 px-2 py-1"}
+          (for [{:keys [id icon name count]} items
+                :let [potion? (= :potion id)]]
+            ($ :li {:key (str id)
+                    :class (if potion?
+                             "flex cursor-pointer items-center gap-2 rounded bg-white/10 px-2 py-1 hover:bg-red-500/40"
+                             "flex items-center gap-2 rounded bg-white/10 px-2 py-1")
+                    :title (when potion? (str "Click or press H to drink (+" potion-heal " health)"))
+                    :on-click (when potion? on-drink)}
                ($ :span {:class "text-base"} icon)
                ($ :span {:class "flex-1"} name)
                ($ :span {:class "font-mono tabular-nums"} count)))))))
@@ -825,7 +877,12 @@
         state-ref (use-ref nil)
         [items set-items!] (use-state [])
         [at-shop? set-at-shop!] (use-state false)
-        [shop-dist set-shop-dist!] (use-state nil)
+        [hp set-hp!] (use-state max-hp)
+        [menu? set-menu!] (use-state false)
+        on-drink (fn []
+                   (when-let [state @state-ref]
+                     (let [st (swap! state drink-potion)]
+                       (set-items! (:inventory st)))))
         on-sell (fn [id n]
                   (when-let [state @state-ref]
                     (let [before (:inventory @state)
@@ -853,9 +910,14 @@
                         (set! (.-width canvas) (* dpr js/window.innerWidth))
                         (set! (.-height canvas) (* dpr js/window.innerHeight))))
              on-down (fn [^js e]
-                       (when (and (game-keys (.-code e)) (not (typing? e)))
-                         (.preventDefault e)
-                         (swap! state update :keys conj (.-code e))))
+                       (when-not (typing? e)
+                         (case (.-code e)
+                           "KeyM" (when-not (.-repeat e) (set-menu! not))
+                           "KeyH" (when-not (.-repeat e)
+                                    (set-items! (:inventory (swap! state drink-potion))))
+                           (when (game-keys (.-code e))
+                             (.preventDefault e)
+                             (swap! state update :keys conj (.-code e))))))
              on-up (fn [^js e] (swap! state update :keys disj (.-code e)))
              on-blur (fn [] (swap! state assoc :keys #{} :mouse-down? false))
              on-move (fn [^js e] (swap! state assoc :mouse [(.-clientX e) (.-clientY e)]))
@@ -889,10 +951,17 @@
                            _ (step-enemies! state (:tiles world) (:surface world) (:light tod) dt)
                            _ (some-> (open-chests! state) set-items!)
                            _ (set-at-shop! (near-shop? player shop))
-                           _ (set-shop-dist! (js/Math.round
-                                              (/ (- (* T (+ (:tx shop) (/ shop-w 2)))
-                                                    (+ (:x player) (/ player-w 2)))
-                                                 T)))
+                           _ (swap! state
+                                    (fn [st]
+                                      (if (<= (get-in st [:player :hp] max-hp) 0)
+                                        (-> st
+                                            (assoc :player (spawn world))
+                                            (update :popups conj
+                                                    (let [p (spawn world)]
+                                                      {:text "You fainted!" :x (+ (:x p) (/ player-w 2))
+                                                       :y (- (:y p) 10) :life 150})))
+                                        (update-in st [:player :hp] #(min max-hp (+ (or % max-hp) (* regen dt)))))))
+                           _ (set-hp! (/ (js/Math.floor (* 10 (get-in @state [:player :hp]))) 10))
                            {:keys [player particles chests popups enemies]}
                            (swap! state #(-> %
                                              (update :particles step-particles dt)
@@ -940,12 +1009,9 @@
      [])
     ($ :div {:class "fixed inset-0 overflow-hidden bg-sky-300"}
        ($ :canvas {:ref canvas-ref :class "block w-full h-full"})
-       ($ :div {:class "absolute top-4 left-4 rounded-md bg-black/40 px-3 py-2 text-sm text-white select-none"}
-          ($ :div "A D move · Space jump · mouse aims pickaxe · Shift or click to dig or hit")
-          (when (and shop-dist (not at-shop?))
-            ($ :div {:class "mt-1 text-amber-200"}
-               (str "🪙 Shop " (if (neg? shop-dist) "← " "") (js/Math.abs shop-dist) " tiles"
-                    (if (pos? shop-dist) " →" "")))))
-       ($ inventory-panel {:items items})
+       ($ health-bar {:hp hp})
+       ($ inventory-panel {:items items :on-drink on-drink})
        (when at-shop?
-         ($ shop-panel {:items items :on-sell on-sell})))))
+         ($ shop-panel {:items items :on-sell on-sell}))
+       (when menu?
+         ($ menu-panel {:on-close #(set-menu! false)})))))
