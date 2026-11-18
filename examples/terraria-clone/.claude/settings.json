@@ -1,6 +1,5 @@
 {
   "permissions": {
-    "blockReadsOutsideWorkingDirectories": true,
     "allow": [
       "Bash(npx polku *)",
       "Bash(curl -s localhost:3000*)",
