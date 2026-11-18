@@ -13,6 +13,15 @@
 (def stone 3)
 (def trunk 4)
 (def leaves 5)
+(def rope 6)
+(def rope-len 10)
+
+(def blocks
+  {:dirt {:id :dirt :name "Dirt" :icon "🟫" :tile dirt}
+   :stone {:id :stone :name "Stone" :icon "🪨" :tile stone}})
+
+(def stack-max {:dirt 100 :stone 100})
+(def climb-v 2.2)
 
 (def player-w 18)
 (def player-h 38)
@@ -23,8 +32,8 @@
 (def swing-frames 14)
 (def reach (* 4.5 T))
 (def max-hp 10)
-;; 60 frames a second, so health refills from 0 to `max-hp` in 20 seconds
-(def regen (/ max-hp (* 20 60)))
+;; 60 frames a second, so health refills one hit point every 30 seconds
+(def regen (/ 1 (* 30 60)))
 (def potion-heal 5)
 
 (defn- hash2 [x y]
@@ -205,7 +214,7 @@
       :else
       (assoc p :y (* T (inc (js/Math.floor (/ ny T)))) :vy 0))))
 
-(defn step-player [tiles p keys dt]
+(defn- step-free [tiles p keys dt]
   (let [dir (- (if (keys "KeyD") 1 0) (if (keys "KeyA") 1 0))
         jump? (keys "Space")
         vx (+ (:vx p) (* (- (* dir run-v) (:vx p)) (min 1 (* 0.25 dt))))
@@ -227,19 +236,59 @@
             p
             (range n))))
 
+(defn- on-rope?
+  "Checks whether a rope tile overlaps the player's centre column."
+  [tiles {:keys [x y]}]
+  (let [tx (js/Math.floor (/ (+ x (/ player-w 2)) T))]
+    (some #(= rope (tile-at tiles tx %))
+          (range (js/Math.floor (/ y T)) (inc (js/Math.floor (/ (+ y player-h -1) T)))))))
+
+(defn- climb
+  "Moves a player holding a rope. Space or W climbs while the hands stay on the rope,
+  S climbs down, and A or D lets go with a small hop to that side."
+  [tiles p keys dt]
+  (let [dir (- (if (keys "KeyD") 1 0) (if (keys "KeyA") 1 0))
+        up? (or (keys "Space") (keys "KeyW"))
+        down? (keys "KeyS")
+        tx (js/Math.floor (/ (+ (:x p) (/ player-w 2)) T))
+        hands-on? (fn [y] (= rope (tile-at tiles tx (js/Math.floor (/ (+ y 10) T)))))
+        vy (cond up? (- climb-v) down? climb-v :else 0)
+        snap-x (- (* T tx) (/ (- player-w T) 2))
+        p (cond-> (assoc p :vx 0 :vy 0)
+            (not (box-hits? tiles snap-x (:y p) player-w player-h)) (assoc :x snap-x))]
+    (if-not (zero? dir)
+      (assoc p :climbing? false :grab-cd 20 :vx (* dir run-v) :vy -5 :facing dir)
+      (let [p (if (or (not up?) (hands-on? (+ (:y p) (* vy dt))))
+                (move-y tiles p (* vy dt))
+                p)]
+        (if (or (not (on-rope? tiles p)) (and down? (:ground? p)))
+          (assoc p :climbing? false)
+          (assoc p :vy 0))))))
+
+(defn step-player
+  "Moves the player one frame. Jumping or falling into a rope grabs it."
+  [tiles p keys dt]
+  (if (:climbing? p)
+    (climb tiles p keys dt)
+    (let [p (step-free tiles (update p :grab-cd #(max 0 (- (or % 0) dt))) keys dt)]
+      (if (and (not (:ground? p)) (zero? (:grab-cd p)) (on-rope? tiles p))
+        (assoc p :climbing? true :vx 0 :vy 0)
+        p))))
+
 (def palette
   {grass ["#5cb83a" "#52aa33"]
    dirt ["#8b5a2b" "#7f5226"]
    stone ["#7d7d85" "#71717a"]
    trunk ["#7a4a24" "#6c4120"]
-   leaves ["#2f9e44" "#288a3b"]})
+   leaves ["#2f9e44" "#288a3b"]
+   rope ["#c8a165" "#8a6a3a"]})
 
 (defn- hand [{:keys [x y]}]
   [(+ x (/ player-w 2)) (+ y 22)])
 
 (defn dig-targets
-  "Returns the first solid tile within `reach` on the line from the player's hand
-  toward `:aim-at`, the mouse position in world coordinates."
+  "Returns the first solid or rope tile within `reach` on the line from the player's
+  hand toward `:aim-at`, the mouse position in world coordinates."
   [tiles {:keys [aim-at] :as p}]
   (when aim-at
     (let [[hx hy] (hand p)
@@ -251,39 +300,102 @@
           (when (<= step reach)
             (let [tx (js/Math.floor (/ (+ hx (* dx (/ step d))) T))
                   ty (js/Math.floor (/ (+ hy (* dy (/ step d))) T))]
-              (if (solid? (tile-at tiles tx ty))
+              (if (let [t (tile-at tiles tx ty)] (or (solid? t) (= rope t)))
                 [[tx ty]]
                 (recur (+ step 2))))))))))
 
 (defn- in-world? [tx ty] (and (< -1 tx W) (< -1 ty (- H 1))))
 
-(declare strike-enemies)
+(defn- place-rope!
+  "Hangs a rope from the air tile under the mouse, if it is within `reach` of the hand,
+  down to `most` tiles (at most `rope-len`) or the first tile that is not air. Returns
+  the number of rope tiles placed."
+  [^js tiles {:keys [aim-at] :as p} most]
+  (let [[hx hy] (hand p)
+        [ax ay] (or aim-at [hx hy])
+        tx (js/Math.floor (/ ax T))
+        ty (js/Math.floor (/ ay T))
+        d (js/Math.hypot (- (* T (+ tx 0.5)) hx) (- (* T (+ ty 0.5)) hy))]
+    (if (and aim-at (<= d reach) (in-world? tx ty) (= air (tile-at tiles tx ty)))
+      (loop [y ty n 0]
+        (if (and (< n (min most rope-len)) (in-world? tx y) (= air (tile-at tiles tx y)))
+          (do (aset tiles (idx tx y) rope) (recur (inc y) (inc n)))
+          n))
+      0)))
+
+(defn- place-block!
+  "Puts `tile` on the air tile under the mouse if it is within `reach` of the hand and
+  does not overlap the player or a slime. Returns true when it was placed."
+  [^js tiles {:keys [aim-at x y] :as p} enemies tile]
+  (let [[hx hy] (hand p)
+        [ax ay] (or aim-at [hx hy])
+        tx (js/Math.floor (/ ax T))
+        ty (js/Math.floor (/ ay T))
+        bx (* tx T) by (* ty T)
+        hits? (fn [ex ey ew eh] (and (< bx (+ ex ew)) (< ex (+ bx T)) (< by (+ ey eh)) (< ey (+ by T))))]
+    (when (and aim-at
+               (<= (js/Math.hypot (- (+ bx (/ T 2)) hx) (- (+ by (/ T 2)) hy)) reach)
+               (in-world? tx ty)
+               (= air (tile-at tiles tx ty))
+               (not (hits? x y player-w player-h))
+               (not-any? #(hits? (:x %) (:y %) (:w %) (:h %)) enemies))
+      (aset tiles (idx tx ty) tile)
+      true)))
+
+(defn- take-rope!
+  "Clears the whole rope that the tile at `tx`, `ty` belongs to and returns how many
+  tiles it had."
+  [^js tiles tx ty]
+  (let [top (loop [y ty] (if (= rope (tile-at tiles tx (dec y))) (recur (dec y)) y))]
+    (loop [y top n 0]
+      (if (= rope (tile-at tiles tx y))
+        (do (aset tiles (idx tx y) air) (recur (inc y) (inc n)))
+        n))))
+
+(declare strike-enemies stash)
 
 (defn- swing!
   "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
-  or breaks the targeted tile when it reaches none. Returns true when a struck enemy
-  dropped coins."
+  or breaks the targeted tile when it reaches none. Hitting a rope takes the whole rope
+  back into the bag. Returns true when the inventory changed."
   [state ^js tiles dt]
   (let [{:keys [player keys mouse-down?]} @state
         left (max 0 (- (:swing player 0) dt))]
     (if (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight")))
       (let [struck (strike-enemies state)
             hits (if struck [] (filterv (fn [[tx ty]] (in-world? tx ty)) (dig-targets tiles player)))
-            debris (for [[tx ty] hits
+            debris (vec (for [[tx ty] hits
                          :let [color (get-in palette [(aget tiles (idx tx ty)) 0])]
                          i (range 7)]
                      {:x (+ (* tx T) (* T (hash2 (+ tx i) ty)))
                       :y (+ (* ty T) (* T (hash2 tx (+ ty i))))
                       :vx (- (* 4 (hash2 (* 3 i) tx)) 2)
                       :vy (- (* -3 (hash2 ty (* 5 i))) 1)
-                      :life 40 :color color})]
-        (doseq [[tx ty] hits] (aset tiles (idx tx ty) air))
-        (swap! state #(-> %
-                          (assoc-in [:player :swing] swing-frames)
-                          (assoc-in [:player :facing]
-                                    (if (< (first (:aim-at player)) (first (hand player))) -1 1))
-                          (update :particles into debris)))
-        (= struck :loot))
+                      :life 40 :color color}))
+            ropes (filterv (fn [[tx ty]] (= rope (aget tiles (idx tx ty)))) hits)
+            pieces (reduce + (map (fn [[tx ty]] (take-rope! tiles tx ty)) ropes))
+            dug (into [] (keep (fn [[tx ty]]
+                        (let [t (aget tiles (idx tx ty))]
+                          (cond (or (= t grass) (= t dirt)) :dirt
+                                (= t stone) :stone))))
+                      hits)]
+        (doseq [[tx ty] hits]
+          (aset tiles (idx tx ty) air))
+        (swap! state #(cond-> (-> %
+                                  (stash (map (fn [[id n]] (assoc (dissoc (blocks id) :tile) :count n))
+                                              (frequencies dug)))
+                                  (assoc-in [:player :swing] swing-frames)
+                                  (assoc-in [:player :facing]
+                                            (if (< (first (:aim-at player)) (first (hand player))) -1 1))
+                                  (update :particles into debris))
+                        (seq ropes)
+                        (-> (stash [(assoc (select-keys (first (filter (fn [i] (= :rope (:id i))) loot))
+                                                        [:id :name :icon])
+                                           :count pieces)])
+                            (update :popups conj
+                                    (let [[tx ty] (first ropes)]
+                                      {:text (str "+" pieces " 🪢 Rope") :x (* T (+ tx 0.5)) :y (* T ty) :life 90})))))
+        (or (= struck :loot) (boolean (seq ropes))))
       (do (swap! state assoc-in [:player :swing] left) false))))
 
 (defn- step-particles [ps dt]
@@ -401,6 +513,16 @@
             sy (js/Math.round (- (* ty T) cam-y))
             shade (if (< (hash2 tx ty) 0.5) 0 1)]
         (cond
+          (= t rope)
+          (do (when (> ty (aget surface tx))
+                (set! (.-fillStyle ctx) (if (zero? shade) "#3d2a1b" "#382618"))
+                (.fillRect ctx sx sy T T))
+              (set! (.-fillStyle ctx) "#c8a165")
+              (.fillRect ctx (+ sx 7) sy 3 T)
+              (set! (.-fillStyle ctx) "#8a6a3a")
+              (.fillRect ctx (+ sx 7) (+ sy 4) 3 2)
+              (.fillRect ctx (+ sx 7) (+ sy 11) 3 2))
+
           (not= t air)
           (do
             (set! (.-fillStyle ctx)
@@ -505,29 +627,55 @@
           inventory
           items))
 
+(def bag-size 5)
+(def bag-ids #{:potion :rope :dirt :stone})
+
+(defn- bag-slot
+  "Returns the bag slot that holds `id`, or else the first empty slot, or nil."
+  [bag id]
+  (or (first (keep-indexed (fn [i s] (when (= id (:id s)) i)) bag))
+      (first (keep-indexed (fn [i s] (when-not s i)) bag))))
+
+(defn- stash
+  "Stacks potions, rope and blocks from `items` into the bag, one kind per slot and up
+  to `stack-max`. Other items, and potions or rope that find no room, go into the
+  inventory. Blocks that find no room are dropped."
+  [st items]
+  (reduce (fn [st {:keys [id count] :as item}]
+            (if-let [i (and (bag-ids id) (bag-slot (:bag st) id))]
+              (let [n (min count (- (stack-max id ##Inf) (get-in st [:bag i :count] 0)))
+                    st (cond-> st
+                         (pos? n) (update-in [:bag i] (fn [s] (-> (or s (select-keys item [:id :name :icon]))
+                                                                  (update :count (fnil + 0) n)))))]
+                (cond-> st
+                  (and (< n count) (not (blocks id)))
+                  (update :inventory add-items [(assoc item :count (- count n))])))
+              (cond-> st
+                (not (blocks id)) (update :inventory add-items [item]))))
+          st items))
+
 (defn- open-chests!
-  "Opens every closed chest the player is next to and returns the new inventory, or nil."
+  "Opens every closed chest the player is next to and returns the new state, or nil."
   [state]
   (let [{:keys [player chests]} @state
         hits (keep-indexed (fn [i c] (when (and (not (:open? c)) (near-chest? player c)) i)) chests)]
     (when (seq hits)
-      (:inventory
-       (swap! state
-              (fn [st]
-                (reduce (fn [st i]
-                          (let [c (get-in st [:chests i])
-                                [cx cy] (chest-box c)]
-                            (-> st
-                                (assoc-in [:chests i :open?] true)
-                                (update :inventory add-items (:items c))
-                                (update :popups into
-                                        (map-indexed (fn [n {:keys [icon name count]}]
-                                                       {:text (str "+" count " " icon " " name)
-                                                        :x (+ cx (/ chest-w 2))
-                                                        :y (- cy 8 (* n 18))
-                                                        :life 120})
-                                                     (:items c))))))
-                        st hits)))))))
+      (swap! state
+             (fn [st]
+               (reduce (fn [st i]
+                         (let [c (get-in st [:chests i])
+                               [cx cy] (chest-box c)]
+                           (-> st
+                               (assoc-in [:chests i :open?] true)
+                               (stash (:items c))
+                               (update :popups into
+                                       (map-indexed (fn [n {:keys [icon name count]}]
+                                                      {:text (str "+" count " " icon " " name)
+                                                       :x (+ cx (/ chest-w 2))
+                                                       :y (- cy 8 (* n 18))
+                                                       :life 120})
+                                                    (:items c))))))
+                       st hits))))))
 
 (defn- step-popups [ps dt]
   (into [] (comp (map #(-> % (update :y - (* 0.35 dt)) (update :life - dt)))
@@ -706,7 +854,7 @@
                touching (update :player assoc
                                 :vx (if (< (+ (:x player) (/ player-w 2))
                                            (+ (:x touching) (/ slime-w 2))) -7 7)
-                                :vy -5 :hurt 50
+                                :vy -5 :hurt 50 :climbing? false
                                 :hp (max 0 (dec (:hp player max-hp)))))))))
 
 (defn- strike-enemies
@@ -786,23 +934,79 @@
      :y (- (* T (aget surface x)) player-h 1)
      :vx 0 :vy 0 :facing 1 :walked 0 :ground? false :swing 0 :hp max-hp}))
 
-(defn- drink-potion
-  "Uses one Healing Potion from the inventory to restore `potion-heal` hit points.
-  Leaves the state unchanged when health is full or no potion is left."
-  [{:keys [player inventory] :as st}]
-  (let [potion (first (filter #(= :potion (:id %)) inventory))]
-    (if (and potion (< (:hp player) max-hp))
+(def buy-prices
+  {:potion 10 :rope 5})
+
+(defn- coins [inventory]
+  (reduce + (map :count (filter #(= :coin (:id %)) inventory))))
+
+(defn- remove-items [inventory id n]
+  (into [] (keep (fn [item]
+                   (cond
+                     (not= id (:id item)) item
+                     (> (:count item) n) (update item :count - n))))
+        inventory))
+
+(def buy-amounts
+  {:potion 1 :rope 5})
+
+(defn- buy
+  "Buys `buy-amounts` of `id` into the bag. Leaves the state unchanged when the bag has
+  no slot for it or the player has too few coins."
+  [{:keys [bag inventory] :as st} id]
+  (let [cost (buy-prices id)]
+    (if (and cost (bag-slot bag id) (>= (coins inventory) cost))
       (-> st
-          (update-in [:player :hp] #(min max-hp (+ % potion-heal)))
-          (assoc :inventory (into [] (keep #(cond (not= :potion (:id %)) %
-                                                  (> (:count %) 1) (update % :count dec)))
-                                  inventory))
-          (update :popups conj {:text (str "+" potion-heal " ❤") :x (+ (:x player) (/ player-w 2))
-                                :y (- (:y player) 10) :life 90}))
+          (update :inventory remove-items :coin cost)
+          (stash [(assoc (select-keys (first (filter #(= id (:id %)) loot)) [:id :name :icon])
+                         :count (buy-amounts id))]))
       st)))
 
+(defn- use-slot
+  "Uses the item in bag slot `i`. A Healing Potion restores `potion-heal` hit points
+  when health is not full, Rope hangs down from the tile under the mouse, and a block
+  is placed on the tile under the mouse."
+  [{:keys [player bag enemies] :as st} tiles i]
+  (let [{:keys [id name count]} (get bag i)
+        spend (fn [st n] (if (< n count) (update-in st [:bag i :count] - n) (assoc-in st [:bag i] nil)))
+        popup (fn [st text] (update st :popups conj {:text text :x (+ (:x player) (/ player-w 2))
+                                                      :y (- (:y player) 10) :life 90}))]
+    (cond
+      (and (= :potion id) (< (:hp player) max-hp))
+      (-> st
+          (update-in [:player :hp] #(min max-hp (+ % potion-heal)))
+          (spend 1)
+          (popup (str "+" potion-heal " ❤")))
+
+      (= :potion id) (popup st "Health is full")
+
+      (= :rope id)
+      (let [n (place-rope! tiles player count)]
+        (if (pos? n)
+          (spend st n)
+          (popup st "Point at an open spot within reach")))
+
+      (blocks id)
+      (if (place-block! tiles player enemies (:tile (blocks id)))
+        (spend st 1)
+        (popup st "Point at an open spot within reach"))
+
+      id (popup st (str name " can't be used yet"))
+      :else st)))
+
+(defui bag-bar [{:keys [bag]}]
+  ($ :div {:class "flex gap-1.5 select-none"}
+     (for [i (range bag-size)
+           :let [{:keys [icon name count]} (get bag i)]]
+       ($ :div {:key i :title name
+                :class "relative flex h-11 w-11 items-center justify-center rounded-md border border-white/20 bg-black/40 text-2xl"}
+          ($ :span {:class "absolute left-1 top-0.5 text-[10px] font-semibold text-white/70"} (inc i))
+          icon
+          (when (> count 1)
+            ($ :span {:class "absolute bottom-0 right-1 font-mono text-[11px] font-bold text-white"} count))))))
+
 (defui health-bar [{:keys [hp]}]
-  ($ :div {:class "absolute top-4 left-4 w-56 rounded-md bg-black/40 px-3 py-2 text-sm text-white select-none"}
+  ($ :div {:class "w-56 rounded-md bg-black/40 px-3 py-2 text-sm text-white select-none"}
      ($ :div {:class "mb-1 flex items-center justify-between"}
         ($ :span {:class "font-semibold"} "❤ Health")
         ($ :span {:class "font-mono tabular-nums"} (js/Math.floor hp) " / " max-hp))
@@ -822,40 +1026,58 @@
            ($ :li "A and D move, Space jumps")
            ($ :li "The mouse aims the pickaxe")
            ($ :li "Shift or click digs or hits slimes")
-           ($ :li "H drinks a Healing Potion (+" potion-heal " health), or click it in your items")
+           ($ :li "Keys 1 to 5 use the items in your bag; a Healing Potion gives +" potion-heal " health")
+           ($ :li "The bag has " bag-size " slots, each holding a stack of one kind of item")
+           ($ :li "Rope hangs down from where the mouse points, one rope per block; jump into it to grab it")
+           ($ :li "Hit a rope with the pickaxe to take all of it back")
+           ($ :li "Digging gives Dirt and Stone blocks (up to 100 each); use them from the bag to build")
+           ($ :li "On a rope, Space or W climbs, S climbs down, A or D jumps off")
            ($ :li "Slimes come out in the caves at night")
-           ($ :li "Find the shop on the surface to sell your finds"))
+           ($ :li "Find the shop on the surface to sell your finds and buy potions and rope"))
         ($ :div {:class "mt-4 text-xs text-white/60"} "Press M again to close"))))
 
 (defn- typing? [^js e]
   (let [tag (some-> e .-target .-tagName)]
     (or (= tag "INPUT") (= tag "TEXTAREA") (some-> e .-target .-isContentEditable))))
 
-(def game-keys #{"KeyA" "KeyD" "Space" "ShiftLeft" "ShiftRight"})
+(def game-keys #{"KeyA" "KeyD" "KeyW" "KeyS" "Space" "ShiftLeft" "ShiftRight"})
 
-(defui inventory-panel [{:keys [items on-drink]}]
+(defui inventory-panel [{:keys [items]}]
   ($ :div {:class "absolute top-4 right-4 w-60 rounded-md bg-black/50 p-3 text-sm text-white select-none"}
      ($ :div {:class "mb-2 font-semibold tracking-wide"} "Items")
      (if (empty? items)
        ($ :div {:class "text-white/70"} "Nothing yet. Dig into caves to find chests.")
        ($ :ul {:class "space-y-1"}
-          (for [{:keys [id icon name count]} items
-                :let [potion? (= :potion id)]]
-            ($ :li {:key (str id)
-                    :class (if potion?
-                             "flex cursor-pointer items-center gap-2 rounded bg-white/10 px-2 py-1 hover:bg-red-500/40"
-                             "flex items-center gap-2 rounded bg-white/10 px-2 py-1")
-                    :title (when potion? (str "Click or press H to drink (+" potion-heal " health)"))
-                    :on-click (when potion? on-drink)}
+          (for [{:keys [id icon name count]} items]
+            ($ :li {:key (str id) :class "flex items-center gap-2 rounded bg-white/10 px-2 py-1"}
                ($ :span {:class "text-base"} icon)
                ($ :span {:class "flex-1"} name)
                ($ :span {:class "font-mono tabular-nums"} count)))))))
 
-(defui shop-panel [{:keys [items on-sell]}]
-  (let [sellable (filter #(prices (:id %)) items)]
+(defui shop-panel [{:keys [items bag on-sell on-buy]}]
+  (let [sellable (filter #(prices (:id %)) items)
+        money (coins items)]
     ($ :div {:class "absolute bottom-6 left-1/2 w-80 -translate-x-1/2 rounded-lg border-2 border-amber-700 bg-amber-950/90 p-4 text-sm text-amber-50 shadow-xl select-none"}
        ($ :div {:class "mb-1 text-base font-bold"} "🪙 Shop")
-       ($ :div {:class "mb-3 text-amber-200/80"} "Sell your finds for gold coins.")
+       ($ :div {:class "mb-2 font-semibold text-amber-200"} "Buy")
+       ($ :ul {:class "mb-1 space-y-1"}
+          (for [[id cost] buy-prices
+                :let [{:keys [icon name]} (first (filter #(= id (:id %)) loot))
+                      room? (bag-slot bag id)
+                      ok? (and room? (>= money cost))]]
+            ($ :li {:key (str id) :class "flex items-center gap-2 rounded bg-white/10 px-2 py-1"}
+               ($ :span {:class "text-base"} icon)
+               ($ :span {:class "flex-1"} name (when (> (buy-amounts id) 1) (str " ×" (buy-amounts id))))
+               ($ :span {:class "font-mono text-amber-300"} cost " 🪙")
+               ($ :button {:class (if ok?
+                                    "rounded bg-emerald-600 px-2 py-0.5 font-semibold hover:bg-emerald-500"
+                                    "cursor-not-allowed rounded bg-white/10 px-2 py-0.5 font-semibold text-white/40")
+                           :disabled (not ok?)
+                           :on-click #(do (.blur (.-currentTarget %)) (on-buy id))}
+                  "Buy"))))
+       ($ :div {:class "mb-3 text-xs text-amber-200/70"}
+          (str "You have " money " 🪙."))
+       ($ :div {:class "mb-2 font-semibold text-amber-200"} "Sell")
        (if (empty? sellable)
          ($ :div {:class "text-amber-200/70"} "You have nothing to sell yet.")
          ($ :ul {:class "space-y-1"}
@@ -879,10 +1101,12 @@
         [at-shop? set-at-shop!] (use-state false)
         [hp set-hp!] (use-state max-hp)
         [menu? set-menu!] (use-state false)
-        on-drink (fn []
-                   (when-let [state @state-ref]
-                     (let [st (swap! state drink-potion)]
-                       (set-items! (:inventory st)))))
+        [bag set-bag!] (use-state [])
+        on-buy (fn [id]
+                 (when-let [state @state-ref]
+                   (let [st (swap! state buy id)]
+                     (set-items! (:inventory st))
+                     (set-bag! (:bag st)))))
         on-sell (fn [id n]
                   (when-let [state @state-ref]
                     (let [before (:inventory @state)
@@ -900,7 +1124,8 @@
              ctx (.getContext canvas "2d")
              world (generate)
              state (atom {:player (spawn world) :keys #{} :particles []
-                          :chests (:chests world) :inventory [] :popups []})
+                          :chests (:chests world) :inventory [] :popups []
+                          :bag (vec (repeat bag-size nil))})
              _ (reset! state-ref state)
              shop (:shop world)
              raf (atom nil)
@@ -913,8 +1138,9 @@
                        (when-not (typing? e)
                          (case (.-code e)
                            "KeyM" (when-not (.-repeat e) (set-menu! not))
-                           "KeyH" (when-not (.-repeat e)
-                                    (set-items! (:inventory (swap! state drink-potion))))
+                           ("Digit1" "Digit2" "Digit3" "Digit4" "Digit5")
+                           (when-not (.-repeat e)
+                             (swap! state use-slot (:tiles world) (dec (js/parseInt (subs (.-code e) 5)))))
                            (when (game-keys (.-code e))
                              (.preventDefault e)
                              (swap! state update :keys conj (.-code e))))))
@@ -949,7 +1175,7 @@
                            _ (when (swing! state (:tiles world) dt)
                                (set-items! (:inventory @state)))
                            _ (step-enemies! state (:tiles world) (:surface world) (:light tod) dt)
-                           _ (some-> (open-chests! state) set-items!)
+                           _ (some-> (open-chests! state) :inventory set-items!)
                            _ (set-at-shop! (near-shop? player shop))
                            _ (swap! state
                                     (fn [st]
@@ -961,6 +1187,7 @@
                                                       {:text "You fainted!" :x (+ (:x p) (/ player-w 2))
                                                        :y (- (:y p) 10) :life 150})))
                                         (update-in st [:player :hp] #(min max-hp (+ (or % max-hp) (* regen dt)))))))
+                           _ (set-bag! (:bag @state))
                            _ (set-hp! (/ (js/Math.floor (* 10 (get-in @state [:player :hp]))) 10))
                            {:keys [player particles chests popups enemies]}
                            (swap! state #(-> %
@@ -1009,9 +1236,11 @@
      [])
     ($ :div {:class "fixed inset-0 overflow-hidden bg-sky-300"}
        ($ :canvas {:ref canvas-ref :class "block w-full h-full"})
-       ($ health-bar {:hp hp})
-       ($ inventory-panel {:items items :on-drink on-drink})
+       ($ :div {:class "absolute top-4 left-4 flex flex-col gap-2"}
+          ($ bag-bar {:bag bag})
+          ($ health-bar {:hp hp}))
+       ($ inventory-panel {:items items})
        (when at-shop?
-         ($ shop-panel {:items items :on-sell on-sell}))
+         ($ shop-panel {:items items :bag bag :on-sell on-sell :on-buy on-buy}))
        (when menu?
          ($ menu-panel {:on-close #(set-menu! false)})))))
