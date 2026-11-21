@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Builds a production version of the game into dist/ and copies its files to S3.
+#
+# Usage:
+#   bin/publish s3://bucket/some/path    build, then copy each file under that path
+#   bin/publish --build-only             build into dist/ without copying
+#
+# The copy runs the aws command found on PATH; set AWS_CLI to use another one. With
+# aws-vault, run the whole script inside it:
+#   aws-vault exec <profile> -- bin/publish s3://bucket/some/path
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+target="${1:-}"
+if [ -z "$target" ]; then
+  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+  exit 1
+fi
+if [ "$target" != "--build-only" ] && [[ "$target" != s3://* ]]; then
+  echo "The target must start with s3://, for example s3://my-bucket/game" >&2
+  exit 1
+fi
+
+rm -rf dist
+mkdir -p dist/js dist/css
+
+echo "Compiling the game..."
+# The dev build writes to resources/public/js, so the release goes to its own folder
+npx shadow-cljs release app --config-merge '{:output-dir "dist/js"}'
+
+echo "Building the stylesheet..."
+npx tailwindcss -i src/css/app.css -o dist/css/app.css --minify
+
+# Relative paths let the game run from any folder of the bucket. The version query
+# makes browsers fetch new files after each publish.
+version() { shasum "$1" | cut -c1-10; }
+sed -e "s|href=\"/css/app.css\"|href=\"css/app.css?v=$(version dist/css/app.css)\"|" \
+    -e "s|src=\"/js/main.js\"|src=\"js/main.js?v=$(version dist/js/main.js)\"|" \
+    resources/public/index.html > dist/index.html
+
+files=(index.html js/main.js css/app.css)
+echo "Built into dist/: ${files[*]}"
+
+if [ "$target" = "--build-only" ]; then
+  exit 0
+fi
+
+aws="${AWS_CLI:-aws}"
+base="${target%/}"
+upload() {
+  local file="$1" type="$2" cache="$3"
+  echo "Copying $file to $base/$file"
+  $aws s3 cp "dist/$file" "$base/$file" --content-type "$type" --cache-control "$cache"
+}
+upload js/main.js "application/javascript; charset=utf-8" "public, max-age=31536000"
+upload css/app.css "text/css; charset=utf-8" "public, max-age=31536000"
+# index.html goes last so it never points at files that are not there yet
+upload index.html "text/html; charset=utf-8" "no-cache"
+
+echo "Published to $base/index.html"
