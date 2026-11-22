@@ -216,9 +216,16 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
           (h "button" {:class "primary" :onclick (fn [_] (decide id "allow"))} "Approve")
           (h "button" {:class "deny" :onclick (fn [_] (decide id "deny"))} "Deny")))))
 
-(defn- view [state {:keys [start dismiss toggle-history] :as actions} !ui]
+(defn- task-pill [hidden show-task]
+  (h "button" {:class "pill light" :title "Show the last request" :onclick (fn [_] (show-task))}
+     (if (= :waiting hidden) (h "span" {:class "spin"}) "✓")
+     (if (= :waiting hidden) "Working…" "Last task")))
+
+(defn- view [state {:keys [start dismiss toggle-history show-task] :as actions} !ui]
   (case (:view state)
     :idle      (h "div" {:class "bar"}
+                  (when-let [hidden (and show-task (:hidden state))]
+                    (task-pill hidden show-task))
                   (when toggle-history
                     (h "button" {:class "pill light" :title "Show the commit history"
                                  :onclick (fn [_] (toggle-history))}
@@ -239,7 +246,7 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                      (h "button" {:class "ghost" :onclick (fn [_] (dismiss))} "Hide")))
     :done      (h "div" {:class "panel"}
                   (h "div" {:class "head"} "✓ Done")
-                  (h "p" {:class "msg"} (or (:message state) "The change is in."))
+                  (h "p" {:class "msg"} (or (:reply state) "The change is in."))
                   (h "div" {:class "row"}
                      (h "button" {:class "primary" :onclick (fn [_] (start))} "Record another")
                      (h "button" {:class "ghost" :onclick (fn [_] (dismiss))} "Close")))
@@ -252,7 +259,7 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 (defn mount
   "Mounts the control on the document element and returns `{:host :render :destroy}`.
   `actions` is a map of `:start`, `:stop` (takes the typed note), `:cancel`, `:dismiss`,
-  `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
+  `:show-task`, `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
   and `:jump` (each takes a commit hash), and `:decide` (takes a permission request id and
   \"allow\" or \"deny\")."
   [actions]

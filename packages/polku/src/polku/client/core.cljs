@@ -84,35 +84,45 @@
                     nil))))))
 
 (defn- poll!
-  "Polls the server for the session's status until the agent marks it done."
+  "Polls the server for the session's status until the agent marks it done. A run whose
+  panel is hidden keeps its status in `:hidden` and shows it on the pill in the bar."
   [{:keys [config !state !poll set-state!] :as ctx} id]
   (js/clearTimeout @!poll)
   (reset! !poll
           (js/setTimeout
            (fn []
-             (-> (js/fetch (str (:endpoint config) "/sessions/" id))
-                 (.then (fn [^js res]
-                          (if (= 404 (.-status res))
-                            :gone
-                            (.json res))))
-                 (.then (fn [^js s]
-                          (cond
-                            (= :gone s)
-                            (do (remember! nil) (set-state! {:view :idle}))
+             (let [shown? #(= :waiting (:view @!state))
+                   ;; A redraw during a recording would take focus away from the note field
+                   apply! (fn [changes]
+                            (if (#{:waiting :idle} (:view @!state))
+                              (set-state! changes)
+                              (swap! !state merge changes)))]
+               (-> (js/fetch (str (:endpoint config) "/sessions/" id))
+                   (.then (fn [^js res]
+                            (if (= 404 (.-status res))
+                              :gone
+                              (.json res))))
+                   (.then (fn [^js s]
+                            (cond
+                              (= :gone s)
+                              (do (remember! nil)
+                                  (apply! (if (shown?) {:view :idle :hidden nil} {:hidden nil})))
 
-                            (= "done" (.-status s))
-                            (do (remember! nil) (set-state! {:view :done :message (.-message s)}))
+                              (= "done" (.-status s))
+                              (do (remember! nil)
+                                  (apply! (merge {:reply (.-message s)}
+                                                 (if (shown?) {:view :done} {:hidden :done}))))
 
-                            :else
-                            (let [status   (.-status s)
-                                  progress (mapv #(.-text ^js %) (or (.-progress s) #js []))]
-                              (when (and (= :waiting (:view @!state))
-                                         (not= [status progress]
-                                               [(:status @!state) (:progress @!state)]))
-                                (set-state! {:status status :progress progress}))
-                              (poll! ctx id)))))
-                 ;; The server may be restarting, so the next poll tries again
-                 (.catch (fn [_] (poll! ctx id)))))
+                              :else
+                              (let [status   (.-status s)
+                                    progress (mapv #(.-text ^js %) (or (.-progress s) #js []))]
+                                (when (and (or (shown?) (= :waiting (:hidden @!state)))
+                                           (not= [status progress]
+                                                 [(:status @!state) (:progress @!state)]))
+                                  (apply! {:status status :progress progress}))
+                                (poll! ctx id)))))
+                   ;; The server may be restarting, so the next poll tries again
+                   (.catch (fn [_] (poll! ctx id))))))
            poll-ms)))
 
 (defn- stop-recorder!
@@ -124,7 +134,7 @@
       (-> ((:stop rec) note)
           (.then (fn [id]
                    (remember! id)
-                   (set-state! {:view :waiting :id id :status "complete" :progress []})
+                   (set-state! {:view :waiting :hidden nil :id id :status "complete" :progress []})
                    (poll! ctx id)
                    id))
           (.catch (fn [^js err]
@@ -249,10 +259,16 @@
                    :headers #js {"Content-Type" "application/json"}
                    :body    (js/JSON.stringify #js {:status status})}))
 
-(defn- dismiss! [{:keys [!poll set-state!]}]
-  (js/clearTimeout @!poll)
-  (remember! nil)
-  (set-state! {:view :idle}))
+(defn- dismiss!
+  "Returns to the bar. A run's panel stays reachable from a pill in the bar until the next request is sent."
+  [{:keys [!state set-state!]}]
+  (let [v (:view @!state)]
+    (set-state! (cond-> {:view :idle}
+                  (#{:waiting :done} v) (assoc :hidden v)))))
+
+(defn- show-task! [{:keys [!state set-state!]}]
+  (when-let [v (and (= :idle (:view @!state)) (:hidden @!state))]
+    (set-state! {:view v :hidden nil})))
 
 (defn init
   "Mounts the Polku recording widget in the page and returns its controller object.
@@ -276,6 +292,7 @@
                                      :stop     #(stop-recorder! ctx %)
                                      :cancel   #(cancel! ctx)
                                      :dismiss  #(dismiss! ctx)
+                                     :show-task #(show-task! ctx)
                                      :set-lang #(set-lang! ctx %)
                                      :toggle-history #(toggle-history! ctx)
                                      :toggle-commit  #(toggle-commit! ctx %)
