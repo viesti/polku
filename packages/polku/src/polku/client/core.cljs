@@ -169,6 +169,66 @@
                        (when-let [rec (and (not= lang lang') @!recorder)]
                          ((:set-lang rec) lang'))))))))))
 
+(defn- set-history! [{:keys [!state set-state!]} changes]
+  (set-state! {:history (merge (:history @!state) changes)}))
+
+(defn- fetch-json
+  "Resolves with the parsed body of a successful response and rejects with the server's error otherwise."
+  [url init]
+  (-> (js/fetch url init)
+      (.then (fn [^js res]
+               (.then (.json res)
+                      (fn [^js body]
+                        (if (.-ok res)
+                          (js->clj body :keywordize-keys true)
+                          (throw (js/Error. (or (.-error body) (str "HTTP " (.-status res))))))))))))
+
+(defn- load-history! [{:keys [config] :as ctx}]
+  (set-history! ctx {:loading? true})
+  (-> (fetch-json (str (:endpoint config) "/git/log") nil)
+      (.then (fn [log] (set-history! ctx (assoc log :loading? false :error nil))))
+      (.catch (fn [^js err]
+                (set-history! ctx {:loading? false
+                                   :error    (if (= "not found" (.-message err))
+                                               "The Polku server is older than this widget. Restart it to see the history."
+                                               (str "Could not read the history: " (.-message err)))})))))
+
+(defn- toggle-history! [{:keys [!state] :as ctx}]
+  (if (get-in @!state [:history :open?])
+    (set-history! ctx {:open? false :notice nil :error nil})
+    (do (set-history! ctx {:open? true})
+        (load-history! ctx))))
+
+(defn- toggle-commit! [{:keys [!state] :as ctx} hash]
+  (let [expanded (or (get-in @!state [:history :expanded]) #{})]
+    (set-history! ctx {:expanded (if (expanded hash) (disj expanded hash) (conj expanded hash))})))
+
+(defn- jump!
+  "Asks the server to make a new branch at the commit and switch the working tree to it."
+  [{:keys [config] :as ctx} hash]
+  (set-history! ctx {:busy hash :notice nil :error nil})
+  (-> (fetch-json (str (:endpoint config) "/git/jump")
+                  #js {:method  "POST"
+                       :headers #js {"Content-Type" "application/json"}
+                       :body    (js/JSON.stringify #js {:hash hash})})
+      (.then (fn [{:keys [branch]}]
+               (set-history! ctx {:busy nil :notice (str "Switched to the new branch " branch ".")})
+               (load-history! ctx)))
+      (.catch (fn [^js err]
+                (set-history! ctx {:busy nil :error (.-message err)})))))
+
+(defn- to-main! [{:keys [config] :as ctx}]
+  (set-history! ctx {:busy :main :notice nil :error nil})
+  (-> (fetch-json (str (:endpoint config) "/git/main") #js {:method "POST"})
+      (.then (fn [{:keys [branch]}]
+               (set-history! ctx {:busy nil :notice (str "Switched back to " branch ".")})
+               (load-history! ctx)))
+      (.catch (fn [^js err]
+                (set-history! ctx {:busy nil
+                                   :error (if (= "not found" (.-message err))
+                                            "The Polku server is older than this widget. Restart it to switch branches."
+                                            (.-message err))})))))
+
 (defn- dismiss! [{:keys [!poll set-state!]}]
   (js/clearTimeout @!poll)
   (remember! nil)
@@ -196,7 +256,11 @@
                                      :stop     #(stop-recorder! ctx %)
                                      :cancel   #(cancel! ctx)
                                      :dismiss  #(dismiss! ctx)
-                                     :set-lang #(set-lang! ctx %)})
+                                     :set-lang #(set-lang! ctx %)
+                                     :toggle-history #(toggle-history! ctx)
+                                     :toggle-commit  #(toggle-commit! ctx %)
+                                     :jump           #(jump! ctx %)
+                                     :to-main        #(to-main! ctx)})
             ctx       (assoc ctx :host (:host w))
             api       #js {:start    (fn [overrides]
                                        (start-recorder! ctx (js->clj overrides :keywordize-keys true)))

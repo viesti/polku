@@ -1,6 +1,7 @@
 (ns polku.server.http
   "Ingest server that the browser client posts recordings to."
   (:require ["node:http" :as http]
+            [polku.server.git :as git]
             [polku.server.store :as store]))
 
 (def ^:private max-body (* 25 1024 1024))
@@ -37,6 +38,23 @@
 (def ^:private routes
   [["GET" #"/health"
     (fn [_] {:ok true})]
+
+   ["GET" #"/git/log"
+    (fn [{:keys [root]}] (git/history root))]
+
+   ["POST" #"/git/jump"
+    (fn [{:keys [root req log]}]
+      (.then (read-json req)
+             (fn [^js body]
+               (let [result (git/jump! root (.-hash body))]
+                 (log (str "switched to new branch " (:branch result) " at " (.-hash body)))
+                 result))))]
+
+   ["POST" #"/git/main"
+    (fn [{:keys [root log]}]
+      (let [result (git/to-main! root)]
+        (log (str "switched to " (:branch result)))
+        result))]
 
    ["POST" #"/sessions"
     (fn [{:keys [root req log]}]
