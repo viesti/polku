@@ -137,6 +137,17 @@
                    ".bwwllwwb."
                    "..bbbbbb.."
                    ".........."]}
+   :house {:palette {\r "#3f7be0" \d "#2a5bb0" \w "#c98b4f" \s "#a8703c" \h "#2a1608" \p "#6b4423"}
+           :rows ["....rr...."
+                  "...rrrr..."
+                  "..rrrrrr.."
+                  ".rrrrrrrr."
+                  "dddddddddd"
+                  ".wwwwwwww."
+                  ".wwwhhwww."
+                  ".wwwhhwww."
+                  ".ssssssss."
+                  "....pp...."]}
    :key {:palette {\o "#6b4a00" \y "#ffcc33"}
          :rows [".........."
                 ".ooo......"
