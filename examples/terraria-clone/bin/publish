@@ -2,7 +2,7 @@
 # Builds a production version of the game into dist/ and copies its files to S3.
 #
 # Usage:
-#   bin/publish s3://bucket/some/path    build, then copy each file under that path
+#   bin/publish s3://bucket/some/path    build, then copy each changed file under that path
 #   bin/publish --build-only             build into dist/ without copying
 #
 # The copy runs the aws command found on PATH; set AWS_CLI to use another one. With
@@ -48,10 +48,39 @@ fi
 
 aws="${AWS_CLI:-aws}"
 base="${target%/}"
+bucket="${base#s3://}"
+bucket="${bucket%%/*}"
+prefix="${base#s3://$bucket}"
+prefix="${prefix#/}"
+prefix="${prefix:+$prefix/}"
+
+md5_of() { openssl dgst -md5 -r "$1" | cut -d' ' -f1; }
+
+# Prints the MD5 of the object already at `key`, or nothing when it is missing. A
+# multipart upload's ETag is not an MD5, so the md5 metadata this script writes wins.
+remote_md5() {
+  local out etag meta
+  out=$($aws s3api head-object --bucket "$bucket" --key "$1" \
+          --query '[ETag, Metadata.md5]' --output text 2>/dev/null) || return 0
+  etag=$(printf '%s' "$out" | cut -f1 | tr -d '"')
+  meta=$(printf '%s' "$out" | cut -f2)
+  if [ -n "$meta" ] && [ "$meta" != "None" ]; then
+    echo "$meta"
+  elif [[ "$etag" != *-* ]]; then
+    echo "$etag"
+  fi
+}
+
 upload() {
-  local file="$1" type="$2" cache="$3"
+  local file="$1" type="$2" cache="$3" sum
+  sum=$(md5_of "dist/$file")
+  if [ -n "$sum" ] && [ "$(remote_md5 "$prefix$file")" = "$sum" ]; then
+    echo "Unchanged $file"
+    return
+  fi
   echo "Copying $file to $base/$file"
-  $aws s3 cp "dist/$file" "$base/$file" --content-type "$type" --cache-control "$cache"
+  $aws s3 cp "dist/$file" "$base/$file" --content-type "$type" --cache-control "$cache" \
+    --metadata "md5=$sum"
 }
 upload js/main.js "application/javascript; charset=utf-8" "public, max-age=31536000"
 upload css/app.css "text/css; charset=utf-8" "public, max-age=31536000"
