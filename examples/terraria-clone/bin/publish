@@ -38,8 +38,9 @@ sed -e "s|href=\"/css/app.css\"|href=\"css/app.css?v=$(version dist/css/app.css)
     -e "s|src=\"/js/main.js\"|src=\"js/main.js?v=$(version dist/js/main.js)\"|" \
     resources/public/index.html > dist/index.html
 
-files=(index.html js/main.js css/app.css)
-echo "Built into dist/: ${files[*]}"
+cp -R resources/public/audio dist/audio
+
+echo "Built into dist/: index.html js/main.js css/app.css audio/"
 
 if [ "$target" = "--build-only" ]; then
   exit 0
@@ -54,6 +55,13 @@ upload() {
 }
 upload js/main.js "application/javascript; charset=utf-8" "public, max-age=31536000"
 upload css/app.css "text/css; charset=utf-8" "public, max-age=31536000"
+for f in dist/audio/*; do
+  name="audio/$(basename "$f")"
+  case "$f" in
+    *.ogg) upload "$name" "audio/ogg" "public, max-age=86400" ;;
+    *.m4a) upload "$name" "audio/mp4" "public, max-age=86400" ;;
+  esac
+done
 # index.html goes last so it never points at files that are not there yet
 upload index.html "text/html; charset=utf-8" "no-cache"
 
