@@ -41,6 +41,29 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
   border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
 .pill .spin { border-color: #4b5563; border-top-color: #fff; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.stack { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.bar { display: flex; gap: 8px; }
+.pill.light { background: #fff; color: #111827; border: 1px solid #e5e7eb; }
+.history { width: 440px; max-width: calc(100vw - 32px); display: flex; flex-direction: column; max-height: 60vh; }
+.history .head .close { margin-left: auto; padding: 2px 8px; }
+.history .row { margin-top: 8px; }
+.branch { font-weight: 400; color: #6b7280; font-family: ui-monospace, monospace; font-size: 12px; }
+.commits { list-style: none; margin: 8px 0 0; padding: 0; overflow-y: auto; min-height: 0; }
+.commits li { border-top: 1px solid #f3f4f6; padding: 6px 0; }
+.commits .line { display: flex; align-items: center; gap: 8px; }
+.commits .subject { flex: 1; min-width: 0; text-align: left; background: none; padding: 2px 0; border-radius: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commits .open .subject { white-space: normal; font-weight: 600; }
+.commits .subject:hover { color: #2563eb; }
+.commits .jump { flex: none; padding: 3px 10px; font-size: 12px; background: #f3f4f6; }
+.commits .jump:hover { background: #111827; color: #fff; }
+.commits .jump:disabled { opacity: .5; cursor: default; }
+.commits .here { flex: none; font-size: 12px; color: #15803d; font-weight: 600; }
+.commits .current .subject { color: #15803d; }
+.meta { margin-top: 4px; color: #6b7280; font-size: 12px; }
+.body { margin: 4px 0 0; white-space: pre-line; font-size: 12px; color: #374151;
+  background: #f9fafb; border-radius: 6px; padding: 6px 8px; }
+.note { margin: 6px 0 0; color: #6b7280; font-size: 12px; }
 ")
 
 (defn- h
@@ -117,10 +140,61 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                        (h "li" {:class "past"} (str "✓ " text)))
                      [(h "li" {:class "now"} (last shown))])))))
 
-(defn- view [state {:keys [start dismiss] :as actions} !ui]
+(defn- short-date [iso]
+  (.toLocaleString (js/Date. iso) js/undefined
+                   #js {:dateStyle "medium" :timeStyle "short"}))
+
+(defn- commit-item [{:keys [head expanded busy]} {:keys [toggle-commit jump]}
+                    {:keys [hash short author date subject body]}]
+  (let [open?    (contains? expanded hash)
+        current? (= hash head)]
+    (h "li" {:class (str (when open? "open ") (when current? "current"))}
+       (h "div" {:class "line"}
+          (h "button" {:class "subject" :title subject :onclick (fn [_] (toggle-commit hash))} subject)
+          (if current?
+            (h "span" {:class "here"} "You are here")
+            (h "button" (cond-> {:class "jump"
+                                 :title "Make a new branch at this commit and switch to it"
+                                 :onclick (fn [_] (jump hash))}
+                          busy (assoc :disabled ""))
+               (if (= busy hash) "Jumping…" "Jump"))))
+       (when open?
+         (h "div" {}
+            (h "div" {:class "meta"} (str short " · " author " · " (short-date date)))
+            (when (seq body) (h "div" {:class "body"} body)))))))
+
+(defn- history-panel [{:keys [branch main busy commits dirty loading? error notice] :as history}
+                      {:keys [toggle-history to-main] :as actions}]
+  (h "div" {:class "panel history"}
+     (h "div" {:class "head"}
+        "History"
+        (h "span" {:class "branch"} (if (seq branch) branch "detached"))
+        (h "button" {:class "ghost close" :title "Close history" :onclick (fn [_] (toggle-history))} "✕"))
+     (when (and main to-main (not= branch main))
+       (h "div" {:class "row"}
+          (h "button" (cond-> {:class "primary"
+                               :title (str "Switch back to the " main " branch")
+                               :onclick (fn [_] (to-main))}
+                        busy (assoc :disabled ""))
+             (if (= busy :main) "Switching…" (str "Back to " main)))))
+     (when notice (h "p" {:class "msg"} notice))
+     (when error (h "p" {:class "msg error"} error))
+     (when dirty
+       (h "p" {:class "note"} "There are uncommitted changes. They come along when you jump, if they fit."))
+     (if (and loading? (empty? commits))
+       (h "div" {:class "row"} (h "span" {:class "spin"}) "Loading…")
+       (apply h "ol" {:class "commits"}
+              (for [c commits] (commit-item history actions c))))))
+
+(defn- view [state {:keys [start dismiss toggle-history] :as actions} !ui]
   (case (:view state)
-    :idle      (h "button" {:class "pill" :title "Record a change request" :onclick (fn [_] (start))}
-                  (h "span" {:class "dot"}) "Record")
+    :idle      (h "div" {:class "bar"}
+                  (when toggle-history
+                    (h "button" {:class "pill light" :title "Show the commit history"
+                                 :onclick (fn [_] (toggle-history))}
+                       "History"))
+                  (h "button" {:class "pill" :title "Record a change request" :onclick (fn [_] (start))}
+                     (h "span" {:class "dot"}) "Record"))
     :starting  (spinner-pill "Starting…")
     :recording (recording-view state actions !ui)
     :sending   (spinner-pill "Sending…")
@@ -147,8 +221,9 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 
 (defn mount
   "Mounts the control on the document element and returns `{:host :render :destroy}`.
-  `actions` is a map of `:start`, `:stop` (takes the typed note), `:cancel`, `:dismiss`
-  and `:set-lang` (takes a language tag)."
+  `actions` is a map of `:start`, `:stop` (takes the typed note), `:cancel`, `:dismiss`,
+  `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, and `:toggle-commit`
+  and `:jump` (each takes a commit hash)."
   [actions]
   (let [^js host (js/document.createElement host-tag)
         shadow   (.attachShadow host #js {:mode "open"})
@@ -163,7 +238,12 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                   (set! (.-textContent ^js (:heard-el @!ui)) (or (:heard state) ""))
                   (do (js/clearInterval (:ticker @!ui))
                       (swap! !ui assoc :view (:view state) :ticker nil)
-                      (.replaceChildren root (view state actions !ui))
+                      (.replaceChildren root
+                                        (h "div" {:class "stack"}
+                                           (when (and (get-in state [:history :open?])
+                                                      (not (#{:recording :starting} (:view state))))
+                                             (history-panel (:history state) actions))
+                                           (view state actions !ui)))
                       (when (= :recording (:view state))
                         (swap! !ui assoc :ticker
                                (js/setInterval
