@@ -1630,10 +1630,15 @@
 
 (declare house-hole)
 
+(def roam-reach (* 5 T))
+(def roam-cycle 24000)
+(def home-ms 10000)
+
 (defn- step-fluffies
-  "Makes waiting Fluffies hover where they are, residents buzz inside their house and
-  following ones fly after the player, through walls and into whichever realm the
-  player is in."
+  "Makes waiting Fluffies hover where they are, and following ones fly after the player,
+  through walls and into whichever realm the player is in. A resident buzzes inside its
+  house for `home-ms` of every `roam-cycle` and spends the rest flying within
+  `roam-reach` of it."
   [{:keys [player realm fluffies houses] :as st} clock dt]
   (let [px (+ (:x player) (/ player-w 2))
         py (:y player)
@@ -1653,13 +1658,20 @@
                          (assoc f :x (+ (:x f) (* k (- tx (:x f))))
                                 :y (+ (:y f) (* k (- ty (:y f)))))))
                      (if-let [h (some->> (:home f) (get houses))]
-                       ;; a resident buzzes about inside its house
                        (let [[hx hy] (house-hole h)
-                             k (min 1 (* 0.12 dt))
-                             tx (+ hx (* 1.5 (js/Math.sin (+ (/ clock 60) (:phase f)))))
-                             ty (+ hy (* 1.2 (js/Math.sin (+ (/ clock 45) (:phase f)))))]
-                         (assoc f :x (+ (:x f) (* k (- tx (:x f))))
-                                :y (+ (:y f) (* k (- ty (:y f))))))
+                             ph (:phase f)
+                             roaming? (> (mod (+ clock (* ph 4000)) roam-cycle) home-ms)
+                             k (min 1 (* (if roaming? 0.03 0.12) dt))
+                             tx (if roaming?
+                                  (+ hx (* roam-reach (js/Math.sin (+ (/ clock 2600) ph))))
+                                  (+ hx (* 1.5 (js/Math.sin (+ (/ clock 60) ph)))))
+                             ty (if roaming?
+                                  (- hy (* T (+ 1.5 (* 1.2 (js/Math.sin (+ (/ clock 1900) ph))))))
+                                  (+ hy (* 1.2 (js/Math.sin (+ (/ clock 45) ph)))))
+                             x (+ (:x f) (* k (- tx (:x f))))
+                             y (+ (:y f) (* k (- ty (:y f))))]
+                         (assoc f :x x :y y
+                                :out? (or roaming? (> (js/Math.hypot (- x hx) (- y hy)) 6))))
                        (let [k (min 1 (* 0.06 dt))
                              ty (+ (:hy f) (* 3 (js/Math.sin (+ (/ clock 400) (:phase f)))))]
                          (assoc f :x (+ (:x f) (* k (- (:hx f) (:x f))))
@@ -1787,12 +1799,13 @@
     (.fillRect ctx (- sx 9) (+ sy hole-r 1) 18 3)))
 
 (defn- draw-fluffies
-  "Draws the Fluffies of `realm` as fuzzy blue balls with flapping wings. A Fluffy at
-  home is drawn a little smaller with its wings folded so it fits its house."
+  "Draws the Fluffies of `realm` as fuzzy blue balls with flapping wings. A Fluffy
+  inside its house is drawn a little smaller with its wings folded so it fits."
   [^js ctx fluffies realm clock cam-x cam-y]
-  (doseq [{:keys [x y phase home] :as f} fluffies
+  (doseq [{:keys [x y phase out?] :as f} fluffies
           :when (= realm (:realm f))
-          :let [flap (js/Math.sin (+ (/ clock 70) phase))
+          :let [home (and (:home f) (not out?))
+                flap (js/Math.sin (+ (/ clock 70) phase))
                 disc (fn [cx cy r]
                        (.beginPath ctx)
                        (.arc ctx cx cy r 0 (* 2 js/Math.PI))
