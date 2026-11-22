@@ -3,6 +3,7 @@
   mouse-aimed pickaxe and collects items from chests in caves."
   (:require [cljs.reader :as reader]
             [demo.icons :as icons]
+            [demo.music :as music]
             [uix.core :refer [$ defui use-effect use-ref use-state]]))
 
 (def T 16)
@@ -2238,14 +2239,20 @@
 (def game-keys #{"KeyA" "KeyD" "KeyW" "KeyS" "Space" "ShiftLeft" "ShiftRight"})
 
 (defui coin-panel [{:keys [coins on-menu]}]
-  ($ :div {:class "absolute top-4 right-4 flex items-stretch gap-2 select-none"}
-     ($ :button {:class "rounded-md bg-black/50 px-4 py-2 text-lg font-bold text-white hover:bg-black/70"
-                 :on-click #(do (.blur (.-currentTarget %)) (on-menu))}
-        "☰ Menu")
-     ($ :div {:class "flex items-center gap-2 rounded-md bg-black/50 px-4 py-2 text-white"
-              :title "Gold Coins"}
-        ($ icons/icon {:id :coin :size 24})
-        ($ :span {:class "font-mono text-xl font-bold tabular-nums text-amber-300"} coins))))
+  (let [[muted? set-muted!] (use-state (music/muted?))]
+    ($ :div {:class "absolute top-4 right-4 flex items-stretch gap-2 select-none"}
+       ($ :button {:class (str "rounded-md bg-black/50 px-3 py-2 text-lg font-bold hover:bg-black/70 "
+                               (if muted? "text-white/40 line-through" "text-white"))
+                   :title (if muted? "Turn music on" "Turn music off")
+                   :on-click #(do (.blur (.-currentTarget %)) (set-muted! (music/toggle-muted!)))}
+          "♪ Music")
+       ($ :button {:class "rounded-md bg-black/50 px-4 py-2 text-lg font-bold text-white hover:bg-black/70"
+                   :on-click #(do (.blur (.-currentTarget %)) (on-menu))}
+          "☰ Menu")
+       ($ :div {:class "flex items-center gap-2 rounded-md bg-black/50 px-4 py-2 text-white"
+                :title "Gold Coins"}
+          ($ icons/icon {:id :coin :size 24})
+          ($ :span {:class "font-mono text-xl font-bold tabular-nums text-amber-300"} coins)))))
 
 (defui price [{:keys [amount]}]
   ($ :span {:class "inline-flex items-center gap-1 font-mono text-amber-300"}
@@ -2387,6 +2394,15 @@
                              clock (+ t (:clock-offset @state 0))
                              _ (swap! state assoc :clock clock)
                              tod (time-of-day clock)
+                             _ (music/want! (case (:realm @state)
+                                              :overworld (if (:day? tod) :overworld-day :overworld-night)
+                                              :slime :slime-hollow
+                                              ;; the throwing part plays from the leap onto the ledge until the boss jumps down
+                                              :arena (case (get-in @state [:boss :mode])
+                                                       nil :slime-hollow
+                                                       (:leap :perch) :boss-throw
+                                                       :boss-ground)
+                                              nil))
                              _ (swing! state (:tiles (here)) dt)
                                        ;; the Slime Dimension stays as dark as night; the arena is dimly lit
                              light (case (:realm @state) :overworld (:light tod) :arena 0.45 0.15)
