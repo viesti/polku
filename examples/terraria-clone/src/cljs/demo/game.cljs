@@ -642,15 +642,10 @@
     (.closePath ctx)
     (.fill ctx)))
 
-(defn- draw-tiles [^js ctx tiles ^js surface vw vh cam-x cam-y]
-  (let [x0 (max 0 (js/Math.floor (/ cam-x T)))
-        x1 (min (dec W) (js/Math.floor (/ (+ cam-x vw) T)))
-        y0 (max 0 (js/Math.floor (/ cam-y T)))
-        y1 (min (dec H) (js/Math.floor (/ (+ cam-y vh) T)))]
-    (doseq [tx (range x0 (inc x1)) ty (range y0 (inc y1))]
+(defn- paint-tile!
+  "Draws tile (`tx`, `ty`) with its top left corner at (`sx`, `sy`)."
+  [^js ctx ^js tiles ^js surface tx ty sx sy]
       (let [t (aget tiles (idx tx ty))
-            sx (js/Math.round (- (* tx T) cam-x))
-            sy (js/Math.round (- (* ty T) cam-y))
             shade (if (< (hash2 tx ty) 0.5) 0 1)
             cave-bg (fn []
                       (set! (.-fillStyle ctx)
@@ -692,7 +687,74 @@
                 (set! (.-fillStyle ctx) "#5f9a4a")
                 (.fillRect ctx (+ sx 2) (+ sy 3) 6 3))))
           (> ty (aget surface tx))
-          (cave-bg))))))
+          (cave-bg))))
+
+(def chunk-n 32)
+
+;; tile array -> {chunk index -> #js {:canvas :snap}}, so each world keeps its own and a
+;; loaded save starts fresh
+(def ^:private chunk-caches (js/WeakMap.))
+
+(defn- chunk-canvas
+  "Returns a canvas holding chunk (`cx`, `cy`) of `tiles`, repainting it only when its
+  tiles differ from the copy taken at the last paint."
+  [^js tiles ^js surface cx cy]
+  (let [cache (or (.get chunk-caches tiles)
+                  (let [c (js/Map.)] (.set chunk-caches tiles c) c))
+        key (+ cx (* cy W))
+        ^js entry (or (.get cache key)
+                      (let [cv (js/document.createElement "canvas")
+                            e #js {:canvas cv :snap nil}]
+                        (set! (.-width cv) (* chunk-n T))
+                        (set! (.-height cv) (* chunk-n T))
+                        (.set cache key e)
+                        e))
+        x0 (* cx chunk-n) y0 (* cy chunk-n)
+        x1 (min W (+ x0 chunk-n)) y1 (min H (+ y0 chunk-n))
+        ^js snap (.-snap entry)
+        same? (and snap
+                   (loop [ty y0 k 0]
+                     (if (= ty y1)
+                       true
+                       (let [row (idx 0 ty)
+                             ok? (loop [tx x0 k k]
+                                   (cond (= tx x1) true
+                                         (= (aget snap k) (aget tiles (+ row tx))) (recur (inc tx) (inc k))
+                                         :else false))]
+                         (when ok? (recur (inc ty) (+ k (- x1 x0))))))))]
+    (when-not same?
+      (let [^js cv (.-canvas entry)
+            ctx (.getContext cv "2d")
+            snap (js/Uint8Array. (* chunk-n chunk-n))]
+        (.clearRect ctx 0 0 (.-width cv) (.-height cv))
+        (loop [ty y0 k 0]
+          (when (< ty y1)
+            (loop [tx x0 k k]
+              (when (< tx x1)
+                (aset snap k (aget tiles (idx tx ty)))
+                (paint-tile! ctx tiles surface tx ty (* T (- tx x0)) (* T (- ty y0)))
+                (recur (inc tx) (inc k))))
+            (recur (inc ty) (+ k (- x1 x0)))))
+        (set! (.-snap entry) snap)))
+    (.-canvas entry)))
+
+(defn- draw-tiles
+  "Draws the visible tiles from cached chunk canvases."
+  [^js ctx tiles ^js surface vw vh cam-x cam-y]
+  (let [cx0 (max 0 (js/Math.floor (/ cam-x (* chunk-n T))))
+        cx1 (min (quot (dec W) chunk-n) (js/Math.floor (/ (+ cam-x vw) (* chunk-n T))))
+        cy0 (max 0 (js/Math.floor (/ cam-y (* chunk-n T))))
+        cy1 (min (quot (dec H) chunk-n) (js/Math.floor (/ (+ cam-y vh) (* chunk-n T))))
+        ox (js/Math.round (- cam-x))
+        oy (js/Math.round (- cam-y))]
+    (loop [cy cy0]
+      (when (<= cy cy1)
+        (loop [cx cx0]
+          (when (<= cx cx1)
+            (.drawImage ctx (chunk-canvas tiles surface cx cy)
+                        (+ ox (* cx chunk-n T)) (+ oy (* cy chunk-n T)))
+            (recur (inc cx))))
+        (recur (inc cy))))))
 
 ;; ooze thinner than this dries up, so a spreading sheet stops as a shallow puddle
 (def ooze-min 0.04)
@@ -1590,6 +1652,16 @@
 (def fluffy-r 9)
 (def fluffy-reach (* 6 T))
 
+(defn- pocket-at
+  "Returns the row of the highest open 3 by 3 cave pocket in column `x`, at least 12
+  tiles below the surface, or nil when the column has none."
+  [^js tiles ^js surface x]
+  (some (fn [y]
+          (when (every? (fn [[dx dy]] (= air (tile-at tiles (+ x dx) (+ y dy))))
+                        (for [dx [-1 0 1] dy [-1 0 1]] [dx dy]))
+            y))
+        (range (+ (aget surface x) 12) (- H 4))))
+
 (defn place-fluffies
   "Hides rare Fluffies in roomy cave pockets of the overworld, well below the surface
   and at least 60 tiles apart."
@@ -1598,11 +1670,7 @@
     (if (>= x (- W 12))
       acc
       (let [spot (when (and (> (- x last) 60) (< (hash2 x 913) 0.03))
-                   (some (fn [y]
-                           (when (every? (fn [[dx dy]] (= air (tile-at tiles (+ x dx) (+ y dy))))
-                                         (for [dx [-1 0 1] dy [-1 0 1]] [dx dy]))
-                             y))
-                         (range (+ (aget surface x) 12) (- H 4))))]
+                   (pocket-at tiles surface x))]
         (if spot
           (recur (inc x) x (conj acc {:realm :overworld
                                       :hx (* T (+ x 0.5)) :hy (* T (+ spot 0.5))
@@ -1633,6 +1701,7 @@
     (if-let [[i f] near]
       (let [follow? (not (:following? f))]
         (-> st
+            (cond-> (and follow? (:red? f)) (assoc-in [:quest :found?] true))
             (update-in [:fluffies i] assoc :following? follow? :hx (:x f) :hy (:y f))
             (update :popups conj {:text (if follow? "A Fluffy is following you!" "The Fluffy waits here")
                                   :x (:x f) :y (- (:y f) 18) :life 120})))
@@ -1705,9 +1774,25 @@
   [h]
   [(+ (:x h) (/ house-w 2)) (- (house-bottom h) 20)])
 
+(def quest-reward 100)
+(def quest-reach (* 4 T))
+(def neighbour-gap (* 40 T))
+
+(defn- next-door?
+  "Checks that house `h` stands within `neighbour-gap` of the house of the Fluffy who
+  gave the quest."
+  [{:keys [quest houses]} h]
+  (when-let [g (get houses (:giver quest))]
+    (and (not= g h) (= (:realm g) (:realm h))
+         (let [[gx gy] (house-hole g)
+               [hx hy] (house-hole h)]
+           (<= (js/Math.hypot (- gx hx) (- gy hy)) neighbour-gap)))))
+
 (defn- settle-fluffies
   "Moves each following Fluffy that comes near an empty house into it, one per house,
-  and pays the player `house-reward` coins for every Fluffy that moves in."
+  and pays the player `house-reward` coins for every Fluffy that moves in. The red
+  Fluffy of the quest moves only into a house near its friend, and finishes
+  the quest for `quest-reward` coins."
   [{:keys [realm houses fluffies] :as st}]
   (reduce
    (fn [st [i f]]
@@ -1715,21 +1800,77 @@
                      (filter (fn [[_ h]]
                                (let [[hx hy] (house-hole h)]
                                  (and (= realm (:realm h)) (nil? (:resident h))
+                                      (or (not (:red? f)) (next-door? st h))
                                       (<= (js/Math.hypot (- hx (:x f)) (- hy (:y f))) settle-reach)))))
                      first)]
        (if-let [[hi h] free]
-         (let [[hx hy] (house-hole h)]
-           (-> st
-               (assoc-in [:houses hi :resident] i)
-               (update-in [:fluffies i] assoc :following? false :home hi :hx hx :hy hy)
-               (add-coins house-reward)
-               (update :popups conj {:text (str "A Fluffy moved in! +" house-reward) :icon :coin
-                                     :x hx :y (- (house-bottom h) house-h 14) :life 150})))
+         (let [[hx hy] (house-hole h)
+               top (- (house-bottom h) house-h 14)]
+           (cond-> (-> st
+                       (assoc-in [:houses hi :resident] i)
+                       (update-in [:fluffies i] assoc :following? false :home hi :hx hx :hy hy))
+             (not (:red? f))
+             (-> (add-coins house-reward)
+                 (update :popups conj {:text (str "A Fluffy moved in! +" house-reward) :icon :coin
+                                       :x hx :y top :life 150}))
+             (:red? f)
+             (-> (add-coins quest-reward)
+                 (assoc-in [:quest :stage] :done)
+                 (update :popups conj {:text (str "Quest complete! The friends are neighbours. +" quest-reward)
+                                       :icon :coin :x hx :y top :life 240}))))
          st)))
    st
    (when (seq houses)
      (filter (fn [[_ f]] (and (:following? f) (= realm (:realm f))))
              (map-indexed vector fluffies)))))
+
+(defn- offer-quest
+  "Lets the Fluffy in the first lived-in house ask for help once no quest has been
+  offered yet."
+  [{:keys [quest houses] :as st}]
+  (if-let [hi (and (nil? quest)
+                   (first (keep-indexed (fn [i h] (when (:resident h) i)) houses)))]
+    (assoc st :quest {:stage :offered :giver hi})
+    st))
+
+(defn- quest-giver-near?
+  "Checks that the player stands close enough to the house that offers the quest to
+  accept it."
+  [{:keys [quest houses player realm]}]
+  (when-let [h (and (= :offered (:stage quest)) (get houses (:giver quest)))]
+    (let [[hx hy] (house-hole h)]
+      (and (= realm (:realm h))
+           (<= (js/Math.hypot (- hx (+ (:x player) (/ player-w 2)))
+                              (- hy (+ (:y player) (/ player-h 2))))
+               quest-reach)))))
+
+(defn- lost-friend
+  "Returns a red Fluffy in a cave pocket of the overworld at least 60 tiles from
+  column `from`, or floating above the ground when the caves have no room."
+  [^js tiles ^js surface from]
+  (let [xs (shuffle (filter #(> (js/Math.abs (- % from)) 60) (range 12 (- W 12))))
+        [x y] (or (some (fn [x] (some->> (pocket-at tiles surface x) (vector x))) xs)
+                  (let [x (first xs)] [x (- (aget surface x) 4)]))]
+    {:realm :overworld :red? true
+     :hx (* T (+ x 0.5)) :hy (* T (+ y 0.5))
+     :x (* T (+ x 0.5)) :y (* T (+ y 0.5))
+     :phase (* 6 (js/Math.random))
+     :following? false}))
+
+(defn- accept-quest
+  "Accepts the quest when the player stands by the house that offers it and puts the
+  lost red Fluffy into the world. Returns nil when there is no quest to accept here."
+  [st]
+  (when (quest-giver-near? st)
+    (let [{:keys [tiles surface]} (get-in st [:worlds :overworld])
+          h (get (:houses st) (get-in st [:quest :giver]))
+          [hx _] (house-hole h)
+          friend (lost-friend tiles surface (js/Math.floor (/ hx T)))]
+      (-> st
+          (update :fluffies (fnil conj []) friend)
+          (update :quest assoc :stage :active :friend (count (:fluffies st)))
+          (update :popups conj {:text "My red friend is lost! Please find it and build it a home near mine."
+                                :x hx :y (- (house-bottom h) house-h 14) :life 300})))))
 
 (defn- place-house
   "Sets a Fluffy House on open ground at the tile under the mouse, within `reach` of the
@@ -1812,9 +1953,12 @@
   "Draws the Fluffies of `realm` as fuzzy blue balls with flapping wings. A Fluffy
   inside its house is drawn a little smaller with its wings folded so it fits."
   [^js ctx fluffies realm clock cam-x cam-y]
-  (doseq [{:keys [x y phase out?] :as f} fluffies
+  (doseq [{:keys [x y phase out? red?] :as f} fluffies
           :when (= realm (:realm f))
           :let [home (and (:home f) (not out?))
+                [wing body shine] (if red?
+                                    ["#ffd6d2" "#e0453d" "#ff8a80"]
+                                    ["#cfe6ff" "#3d7be8" "#6fa3ff"])
                 flap (js/Math.sin (+ (/ clock 70) phase))
                 disc (fn [cx cy r]
                        (.beginPath ctx)
@@ -1824,16 +1968,16 @@
     (.translate ctx (js/Math.round (- x cam-x)) (js/Math.round (- y cam-y)))
     (when home (.scale ctx 0.85 0.85))
     (when-not home
-      (set! (.-fillStyle ctx) "#cfe6ff")
+      (set! (.-fillStyle ctx) wing)
       (doseq [side [-1 1]]
         (.beginPath ctx)
         (.ellipse ctx (* side 11) -3 7 (+ 2 (* 3 (js/Math.abs flap))) (* side -0.5) 0 (* 2 js/Math.PI))
         (.fill ctx)))
-    (set! (.-fillStyle ctx) "#3d7be8")
+    (set! (.-fillStyle ctx) body)
     (doseq [a (range 0 (* 2 js/Math.PI) 0.5)]
       (disc (* fluffy-r (js/Math.cos a)) (* fluffy-r (js/Math.sin a)) 3.5))
     (disc 0 0 fluffy-r)
-    (set! (.-fillStyle ctx) "#6fa3ff")
+    (set! (.-fillStyle ctx) shine)
     (disc -2 -3 5)
     (set! (.-fillStyle ctx) "rgba(255,140,180,0.75)")
     (disc -6.5 3 2)
@@ -1863,8 +2007,8 @@
             :when (= realm (:realm f))
             :let [sx (- (:x f) cam-x) sy (- (:y f) cam-y)
                   g (.createRadialGradient ctx sx sy 2 sx sy 26)]]
-      (.addColorStop g 0 "rgba(140,190,255,0.45)")
-      (.addColorStop g 1 "rgba(140,190,255,0)")
+      (.addColorStop g 0 (if (:red? f) "rgba(255,140,130,0.55)" "rgba(140,190,255,0.45)"))
+      (.addColorStop g 1 (if (:red? f) "rgba(255,140,130,0)" "rgba(140,190,255,0)"))
       (set! (.-fillStyle ctx) g)
       (.fillRect ctx (- sx 26) (- sy 26) 52 52)
       (when (and (not (:following? f)) (not (:home f))
@@ -1875,6 +2019,41 @@
         (set! (.-font ctx) "bold 12px system-ui, sans-serif")
         (set! (.-textAlign ctx) "center")
         (.fillText ctx "E" sx (- sy 22))))))
+
+(defn- draw-quest-mark
+  "Draws a bobbing yellow exclamation mark over the house that offers a quest, with an
+  E key hint beside it while the player is close enough to accept."
+  [^js ctx {:keys [quest houses realm] :as st} clock cam-x cam-y]
+  (when-let [h (and (= :offered (:stage quest)) (get houses (:giver quest)))]
+    (when (= realm (:realm h))
+      (let [sx (- (+ (:x h) (/ house-w 2)) cam-x)
+            sy (- (house-bottom h) house-h cam-y 16 (* 3 (js/Math.sin (/ clock 250))))]
+        (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+        (.fillRect ctx (- sx 9) (- sy 20) 18 22)
+        (set! (.-fillStyle ctx) "#ffd54a")
+        (set! (.-font ctx) "bold 20px system-ui, sans-serif")
+        (set! (.-textAlign ctx) "center")
+        (.fillText ctx "!" sx (- sy 2))
+        (when (quest-giver-near? st)
+          (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+          (.fillRect ctx (+ sx 12) (- sy 18) 16 16)
+          (set! (.-fillStyle ctx) "#ffffff")
+          (set! (.-font ctx) "bold 12px system-ui, sans-serif")
+          (.fillText ctx "E" (+ sx 20) (- sy 6)))))))
+
+(defui quest-panel
+  "Shows the steps of the quest in progress, ticking off each one the player has done."
+  [{:keys [quest]}]
+  (when (= :active (:stage quest))
+    (let [{:keys [found?]} quest
+          step (fn [done? text]
+                 ($ :li {:class (if done? "text-emerald-300 line-through" "text-amber-50")}
+                    (if done? "✓ " "• ") text))]
+      ($ :div {:class "w-64 rounded-md border border-amber-600/60 bg-black/60 px-3 py-2 text-sm select-none"}
+         ($ :div {:class "mb-1 font-bold text-amber-300"} "! Quest: My red friend is lost")
+         ($ :ul {:class "space-y-0.5"}
+            (step found? "Find the red Fluffy (it shows on your map) and press E")
+            (step false "Place a Fluffy House within 40 blocks of its friend's house"))))))
 
 (defn- use-slot
   "Uses the item in bag slot `i`. A Healing Potion restores `potion-heal` hit points
@@ -2306,9 +2485,9 @@
                                 (aset px (+ i 2) b)
                                 (aset px (+ i 3) 255))))
                           (.putImageData ctx img 0 0)
-                          (doseq [f (:fluffies st) :when (= :overworld (:realm f))]
-                            (dot (:x f) (:y f) 3.5 "#ffffff")
-                            (dot (:x f) (:y f) 2.5 "#3d7be8"))
+                          (doseq [f (sort-by :red? (:fluffies st)) :when (= :overworld (:realm f))]
+                            (dot (:x f) (:y f) (if (:red? f) 4.5 3.5) "#ffffff")
+                            (dot (:x f) (:y f) (if (:red? f) 3.5 2.5) (if (:red? f) "#e0453d" "#3d7be8")))
                           (when (= :overworld (:realm st))
                             (let [{:keys [x y]} (:player st)]
                               (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 3 "#111111")
@@ -2412,6 +2591,7 @@
         [bag set-bag!] (use-state [])
         [map? set-map!] (use-state false)
         [map-shown? set-map-shown!] (use-state true)
+        [quest set-quest!] (use-state nil)
         sync! (fn [st]
                 (set-coins! (:coins st 0))
                 (set-bag! (:bag st)))
@@ -2456,7 +2636,7 @@
                          (case (.-code e)
                            "KeyM" (when-not (.-repeat e) (set-menu! not))
                            "KeyE" (when-not (or (.-repeat e) (:paused? @state))
-                                    (swap! state toggle-fluffy))
+                                    (swap! state #(or (accept-quest %) (toggle-fluffy %))))
                            ("Digit1" "Digit2" "Digit3" "Digit4" "Digit5" "Digit6" "Digit7" "Digit8" "Digit9" "Digit0")
                            (when-not (or (.-repeat e) (:paused? @state))
                                                              ;; Digit0 is the tenth slot
@@ -2521,7 +2701,8 @@
                                  (flow-ooze! (:tiles world) levels @flips))
                              _ (step-enemies! state (:tiles world) (:surface world) light dt)
                              _ (step-boss! state (:tiles world) dt)
-                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies))
+                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest))
+                             _ (set-quest! (:quest @state))
                              _ (when (and (= :slime (:realm @state)) (:gate-open? @state)
                                           (touching? player (assoc (:gate world) :w gate-w :h gate-h)))
                                  (swap! state enter-arena))
@@ -2583,6 +2764,7 @@
                                (set! (.-globalCompositeOperation ctx) "source-over")))
                          (draw-eyes ctx enemies light cam-x cam-y)
                          (draw-fluffy-glow ctx (:fluffies @state) (:realm @state) player cam-x cam-y)
+                         (draw-quest-mark ctx @state clock cam-x cam-y)
                          (draw-popups ctx popups cam-x cam-y)
                          (reset! raf (js/requestAnimationFrame frame)))))]
          (resize)
@@ -2608,7 +2790,8 @@
        ($ :canvas {:ref canvas-ref :class "block w-full h-full [image-rendering:pixelated]"})
        ($ :div {:class "absolute top-4 left-4 flex flex-col gap-2"}
           ($ bag-bar {:bag bag})
-          ($ health-bar {:hp hp}))
+          ($ health-bar {:hp hp})
+          ($ quest-panel {:quest quest}))
        ($ coin-panel {:coins coins :on-menu #(set-menu! not)
                       :map? map? :map-shown? map-shown? :on-map #(set-map-shown! not)})
        (when (and map? map-shown?)
