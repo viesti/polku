@@ -1304,6 +1304,16 @@
           (stash [(assoc (item-def id) :count (buy-amounts id))]))
       st)))
 
+(def map-price 80)
+
+(defn- buy-map
+  "Buys the map for `map-price` coins. Leaves the state unchanged when the player
+  already owns it or has too few coins."
+  [st]
+  (if (and (not (:map? st)) (>= (:coins st 0) map-price))
+    (-> st (add-coins (- map-price)) (assoc :map? true))
+    st))
+
 (defn add-arena
   "Gives a game started before the arena existed its gate and arena."
   [st]
@@ -2261,9 +2271,65 @@
 
 (def game-keys #{"KeyA" "KeyD" "KeyW" "KeyS" "Space" "ShiftLeft" "ShiftRight"})
 
-(defui coin-panel [{:keys [coins on-menu]}]
+(def map-colors
+  {grass [86 170 60] dirt [140 92 52] stone [118 118 128] trunk [110 72 40]
+   leaves [52 140 60] rope [200 170 110]})
+
+(defui mini-map
+  "Draws the overworld one pixel per tile, refreshed twice a second, with every
+  Fluffy in the overworld as a blue dot and the player as a white dot."
+  [{:keys [state-ref]}]
+  (let [canvas-ref (use-ref nil)]
+    (use-effect
+     (fn []
+       (let [draw (fn []
+                    (when-let [^js canvas @canvas-ref]
+                      (when-let [state @state-ref]
+                        (let [st @state
+                              {:keys [tiles surface]} (get-in st [:worlds :overworld])
+                              ctx (.getContext canvas "2d")
+                              img (.createImageData ctx W H)
+                              ^js px (.-data img)
+                              dot (fn [x y r color]
+                                    (set! (.-fillStyle ctx) color)
+                                    (.beginPath ctx)
+                                    (.arc ctx (/ x T) (/ y T) r 0 (* 2 js/Math.PI))
+                                    (.fill ctx))]
+                          (dotimes [y H]
+                            (dotimes [x W]
+                              (let [t (aget tiles (idx x y))
+                                    [r g b] (or (map-colors t)
+                                                (if (< y (aget surface x)) [120 190 240] [34 24 18]))
+                                    i (* 4 (idx x y))]
+                                (aset px i r)
+                                (aset px (+ i 1) g)
+                                (aset px (+ i 2) b)
+                                (aset px (+ i 3) 255))))
+                          (.putImageData ctx img 0 0)
+                          (doseq [f (:fluffies st) :when (= :overworld (:realm f))]
+                            (dot (:x f) (:y f) 3.5 "#ffffff")
+                            (dot (:x f) (:y f) 2.5 "#3d7be8"))
+                          (when (= :overworld (:realm st))
+                            (let [{:keys [x y]} (:player st)]
+                              (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 3 "#111111")
+                              (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 2 "#ffffff")))))))
+             id (js/setInterval draw 500)]
+         (draw)
+         #(js/clearInterval id)))
+     [state-ref])
+    ($ :canvas {:ref canvas-ref :width W :height H
+                :class "block w-[480px] max-w-[45vw] rounded-md border-2 border-amber-800 [image-rendering:pixelated]"})))
+
+(defui coin-panel [{:keys [coins on-menu map? map-shown? on-map]}]
   (let [[muted? set-muted!] (use-state (music/muted?))]
     ($ :div {:class "absolute top-4 right-4 flex items-stretch gap-2 select-none"}
+       (when map?
+         ($ :button {:class (str "flex items-center gap-1.5 rounded-md bg-black/50 px-3 py-2 text-lg font-bold hover:bg-black/70 "
+                                 (if map-shown? "text-white" "text-white/40"))
+                     :title (if map-shown? "Hide the map" "Show the map")
+                     :on-click #(do (.blur (.-currentTarget %)) (on-map))}
+            ($ icons/icon {:id :map :size 20})
+            "Map"))
        ($ :button {:class (str "rounded-md bg-black/50 px-3 py-2 text-lg font-bold hover:bg-black/70 "
                                (if muted? "text-white/40 line-through" "text-white"))
                    :title (if muted? "Turn music on" "Turn music off")
@@ -2281,7 +2347,7 @@
   ($ :span {:class "inline-flex items-center gap-1 font-mono text-amber-300"}
      amount ($ icons/icon {:id :coin :size 14})))
 
-(defui shop-panel [{:keys [coins bag on-sell on-buy]}]
+(defui shop-panel [{:keys [coins bag on-sell on-buy map? on-buy-map]}]
   (let [sellable (filter #(and % (prices (:id %))) bag)
         money coins]
     ($ :div {:class "absolute bottom-6 left-1/2 w-80 -translate-x-1/2 rounded-lg border-2 border-amber-700 bg-amber-950/90 p-4 text-sm text-amber-50 shadow-xl select-none"}
@@ -2301,7 +2367,21 @@
                                     "cursor-not-allowed rounded bg-white/10 px-2 py-0.5 font-semibold text-white/40")
                            :disabled (not ok?)
                            :on-click #(do (.blur (.-currentTarget %)) (on-buy id))}
-                  "Buy"))))
+                  "Buy")))
+          (let [ok? (and (not map?) (>= money map-price))]
+            ($ :li {:key "map" :class "flex items-center gap-2 rounded bg-white/10 px-2 py-1"}
+               ($ icons/icon {:id :map :size 20})
+               ($ :span {:class "flex-1"} "Map of Fluffies")
+               (if map?
+                 ($ :span {:class "px-2 py-0.5 font-semibold text-emerald-300"} "Owned")
+                 ($ :<>
+                    ($ price {:amount map-price})
+                    ($ :button {:class (if ok?
+                                         "rounded bg-emerald-600 px-2 py-0.5 font-semibold hover:bg-emerald-500"
+                                         "cursor-not-allowed rounded bg-white/10 px-2 py-0.5 font-semibold text-white/40")
+                                :disabled (not ok?)
+                                :on-click #(do (.blur (.-currentTarget %)) (on-buy-map))}
+                       "Buy"))))))
        ($ :div {:class "mb-3 flex items-center gap-1 text-xs text-amber-200/70"}
           "You have " ($ price {:amount money}))
        ($ :div {:class "mb-2 font-semibold text-amber-200"} "Sell")
@@ -2330,9 +2410,15 @@
         [boss-hp set-boss-hp!] (use-state nil)
         [menu? set-menu!] (use-state false)
         [bag set-bag!] (use-state [])
+        [map? set-map!] (use-state false)
+        [map-shown? set-map-shown!] (use-state true)
         sync! (fn [st]
                 (set-coins! (:coins st 0))
                 (set-bag! (:bag st)))
+        on-buy-map (fn []
+                     (when-let [state @state-ref]
+                       (sync! (swap! state buy-map))
+                       (set-map-shown! true)))
         on-buy (fn [id]
                  (when-let [state @state-ref]
                    (sync! (swap! state buy id))))
@@ -2456,6 +2542,7 @@
                                           (update-in st [:player :hp] #(min max-hp (+ (or % max-hp) (* regen dt)))))))
                              _ (set-coins! (:coins @state 0))
                              _ (set-bag! (:bag @state))
+                             _ (set-map! (boolean (:map? @state)))
                              _ (set-hp! (/ (js/Math.floor (* 10 (get-in @state [:player :hp]))) 10))
                              {:keys [player particles chests popups enemies portal]}
                              (swap! state #(-> %
@@ -2522,11 +2609,16 @@
        ($ :div {:class "absolute top-4 left-4 flex flex-col gap-2"}
           ($ bag-bar {:bag bag})
           ($ health-bar {:hp hp}))
-       ($ coin-panel {:coins coins :on-menu #(set-menu! not)})
+       ($ coin-panel {:coins coins :on-menu #(set-menu! not)
+                      :map? map? :map-shown? map-shown? :on-map #(set-map-shown! not)})
+       (when (and map? map-shown?)
+         ($ :div {:class "absolute top-20 right-4 select-none"}
+            ($ mini-map {:state-ref state-ref})))
        (when boss-hp
          ($ boss-bar {:hp boss-hp}))
        (when at-shop?
-         ($ shop-panel {:coins coins :bag bag :on-sell on-sell :on-buy on-buy}))
+         ($ shop-panel {:coins coins :bag bag :on-sell on-sell :on-buy on-buy
+                        :map? map? :on-buy-map on-buy-map}))
        (when menu?
          ($ menu-panel {:on-close #(set-menu! false)
                         :snapshot #(save-data @@state-ref)

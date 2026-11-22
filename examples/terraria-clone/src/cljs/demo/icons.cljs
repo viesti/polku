@@ -158,6 +158,17 @@
                 ".ooo..oyo."
                 ".......o.."
                 ".........."
+                ".........."]}
+   :map {:palette {\o "#5a3a12" \p "#f3e2b3" \s "#d9c48c" \r "#e53935" \b "#3d7be8"}
+         :rows [".........."
+                "oooooooooo"
+                "oppsppsppo"
+                "opbspprppo"
+                "oppsprrrpo"
+                "opbsppspbo"
+                "oppsppsppo"
+                "opbsppspbo"
+                "oooooooooo"
                 ".........."]}})
 
 (def ^:private pixels
