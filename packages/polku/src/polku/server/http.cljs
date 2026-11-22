@@ -1,6 +1,7 @@
 (ns polku.server.http
   "Ingest server that the browser client posts recordings to."
   (:require ["node:http" :as http]
+            [polku.server.approvals :as approvals]
             [polku.server.git :as git]
             [polku.server.store :as store]))
 
@@ -55,6 +56,28 @@
       (let [result (git/to-main! root)]
         (log (str "switched to " (:branch result)))
         result))]
+
+   ["GET" #"/approvals"
+    (fn [_] {:pending (approvals/pending)})]
+
+   ["POST" #"/approvals"
+    (fn [{:keys [req log]}]
+      (.then (read-json req)
+             (fn [body]
+               (let [r (approvals/create! (js->clj body :keywordize-keys true))]
+                 (log (str "approval " (:id r) " requested for " (:tool r)))
+                 r))))]
+
+   ["GET" #"/approvals/([^/]+)"
+    (fn [{:keys [id]}] (approvals/fetch id))]
+
+   ["POST" #"/approvals/([^/]+)/decision"
+    (fn [{:keys [req id log]}]
+      (.then (read-json req)
+             (fn [^js body]
+               (let [r (approvals/decide! id (.-status body))]
+                 (log (str "approval " id " " (:status r)))
+                 r))))]
 
    ["POST" #"/sessions"
     (fn [{:keys [root req log]}]

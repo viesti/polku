@@ -229,6 +229,26 @@
                                             "The Polku server is older than this widget. Restart it to switch branches."
                                             (.-message err))})))))
 
+(defn- watch-approvals!
+  "Polls the server for the agent's unanswered permission requests and redraws when they change."
+  [{:keys [config !state set-state!] :as ctx}]
+  (-> (fetch-json (str (:endpoint config) "/approvals") nil)
+      (.then (fn [{:keys [pending]}]
+               (when (not= (map :id pending) (map :id (:approvals @!state)))
+                 (set-state! {:approvals pending}))))
+      ;; An older server or one that is down shows no requests, and the next poll tries again
+      (.catch (fn [_]
+                (when (seq (:approvals @!state))
+                  (set-state! {:approvals []}))))
+      (.finally #(js/setTimeout (fn [] (watch-approvals! ctx)) poll-ms))))
+
+(defn- decide! [{:keys [config !state set-state!]} id status]
+  (set-state! {:approvals (vec (remove #(= id (:id %)) (:approvals @!state)))})
+  (fetch-json (str (:endpoint config) "/approvals/" id "/decision")
+              #js {:method  "POST"
+                   :headers #js {"Content-Type" "application/json"}
+                   :body    (js/JSON.stringify #js {:status status})}))
+
 (defn- dismiss! [{:keys [!poll set-state!]}]
   (js/clearTimeout @!poll)
   (remember! nil)
@@ -260,7 +280,8 @@
                                      :toggle-history #(toggle-history! ctx)
                                      :toggle-commit  #(toggle-commit! ctx %)
                                      :jump           #(jump! ctx %)
-                                     :to-main        #(to-main! ctx)})
+                                     :to-main        #(to-main! ctx)
+                                     :decide         #(decide! ctx %1 %2)})
             ctx       (assoc ctx :host (:host w))
             api       #js {:start    (fn [overrides]
                                        (start-recorder! ctx (js->clj overrides :keywordize-keys true)))
@@ -277,6 +298,7 @@
         (reset! !widget w)
         ((:render w) @!state false)
         (check-languages! ctx)
+        (watch-approvals! ctx)
         ;; A full page reload during an agent run resumes showing that run's status
         (when-let [pending (recall)]
           ((:set-state! ctx) {:view :waiting :id pending :status "complete" :progress []})

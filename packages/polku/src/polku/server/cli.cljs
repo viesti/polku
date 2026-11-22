@@ -26,6 +26,10 @@
   events [id]           Print the raw events of a session as JSON lines
       --type <t>        Only events of this type; repeatable
   list                  List sessions and their status
+  permission-hook       Claude Code PermissionRequest hook: ask in the browser widget and
+                        print the answer; falls back to the terminal prompt if unanswered
+      --port <n>        Port of the ingest server (default 4777)
+      --timeout <s>     Seconds to wait for an answer (default 300)
   mcp                   Serve sessions to an agent as MCP tools over stdio
   init                  Install the Claude Code skill, MCP server entry and gitignore entry in this project
 
@@ -105,6 +109,73 @@ Common options:
        (.on child "exit" resolve)
        (.on (.-stdin child) "error" (fn [_]))
        (.end (.-stdin child) task)))))
+
+(defn- read-stdin []
+  (js/Promise.
+   (fn [resolve reject]
+     (let [chunks #js []]
+       (.on js/process.stdin "data" #(.push chunks %))
+       (.on js/process.stdin "end" #(resolve (.toString (js/Buffer.concat chunks) "utf8")))
+       (.on js/process.stdin "error" reject)))))
+
+(defn- post-json [url body]
+  (-> (js/fetch url #js {:method  "POST"
+                         :headers #js {"Content-Type" "application/json"}
+                         :body    (js/JSON.stringify body)})
+      (.then (fn [^js res]
+               (if (.-ok res) (.json res) (throw (js/Error. (str "HTTP " (.-status res)))))))))
+
+(defn- await-decision
+  "Resolves with \"allow\" or \"deny\" once the user answers request `id`, or nil after `timeout-s` seconds."
+  [base id timeout-s]
+  (let [deadline (+ (js/Date.now) (* 1000 timeout-s))]
+    (js/Promise.
+     (fn [resolve _]
+       ((fn poll []
+          (-> (js/fetch (str base "/approvals/" id))
+              (.then (fn [^js res] (if (.-ok res) (.json res) #js {:status "gone"})))
+              (.then (fn [^js r]
+                       (cond
+                         (#{"allow" "deny"} (.-status r)) (resolve (.-status r))
+                         (not= "pending" (.-status r))    (resolve nil)
+                         (> (js/Date.now) deadline)       (resolve nil)
+                         :else                            (js/setTimeout poll 500))))
+              (.catch (fn [_] (resolve nil))))))))))
+
+(defn- permission-hook
+  "Shows a Claude Code permission request in the browser widget and prints the user's answer
+  as hook output. Prints nothing when the server is unreachable or nobody answers in time,
+  which leaves the decision to the agent's own prompt."
+  [{:keys [port timeout]}]
+  (let [base     (str "http://127.0.0.1:" port)
+        !id      (atom nil)
+        withdraw (fn []
+                   (if-let [id @!id]
+                     (-> (post-json (str base "/approvals/" id "/decision") #js {:status "withdrawn"})
+                         (.catch (fn [_]))
+                         (.finally #(js/process.exit 0)))
+                     (js/process.exit 0)))]
+    (.on js/process "SIGTERM" withdraw)
+    (.on js/process "SIGINT" withdraw)
+    (-> (read-stdin)
+        (.then (fn [text]
+                 (let [^js hook (js/JSON.parse text)]
+                   (post-json (str base "/approvals")
+                              #js {:tool (.-tool_name hook) :input (.-tool_input hook)}))))
+        (.then (fn [^js r]
+                 (reset! !id (.-id r))
+                 (await-decision base (.-id r) (js/Number (or timeout 300)))))
+        (.then (fn [decision]
+                 (if decision
+                   (println (js/JSON.stringify
+                             (clj->js {:hookSpecificOutput
+                                       {:hookEventName "PermissionRequest"
+                                        :decision (if (= "allow" decision)
+                                                    {:behavior "allow"}
+                                                    {:behavior "deny"
+                                                     :message  "The user denied this in the browser."})}})))
+                   (withdraw))))
+        (.catch (fn [_] (withdraw))))))
 
 (defn- watch-loop [root command]
   (.then (wait-for-session root nil)
@@ -192,6 +263,7 @@ Common options:
    "list"    (fn [{:keys [root]}]
                (doseq [m (store/list-sessions root)]
                  (println (str (:id m) "  " (.padEnd (:status m) 9) "  " (:url m)))))
+   "permission-hook" (fn [{:keys [opts]}] (permission-hook opts))
    "mcp"     (fn [{:keys [root]}]
                (mcp/serve {:root root :version version}))
    "init"    (fn [_]

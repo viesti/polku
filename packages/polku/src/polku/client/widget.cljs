@@ -64,6 +64,12 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 .body { margin: 4px 0 0; white-space: pre-line; font-size: 12px; color: #374151;
   background: #f9fafb; border-radius: 6px; padding: 6px 8px; }
 .note { margin: 6px 0 0; color: #6b7280; font-size: 12px; }
+.approval { width: 440px; max-width: calc(100vw - 32px); border-color: #f59e0b; }
+.approval .head::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #f59e0b;
+  animation: pulse 1.2s infinite; }
+.cmd { margin: 8px 0 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 12px/1.45 ui-monospace, monospace; background: #111827; color: #f9fafb; border-radius: 8px; padding: 8px 10px; }
+.deny { background: #fee2e2; color: #991b1b; }
 ")
 
 (defn- h
@@ -186,6 +192,30 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
        (apply h "ol" {:class "commits"}
               (for [c commits] (commit-item history actions c))))))
 
+(defn- command-text
+  "Shows a tool call the way the agent's own prompt would, falling back to the raw input."
+  [tool input]
+  (let [{:keys [command file_path url pattern]} input]
+    (cond
+      command   command
+      file_path (str tool " " file_path)
+      url       (str tool " " url)
+      pattern   (str tool " " pattern)
+      :else     (str tool " " (js/JSON.stringify (clj->js input) nil 2)))))
+
+(defn- approval-panel [approvals {:keys [decide]}]
+  (let [{:keys [id tool input]} (first approvals)
+        more (dec (count approvals))]
+    (h "div" {:class "panel approval"}
+       (h "div" {:class "head"} "The agent asks to run this")
+       (when-let [d (:description input)] (h "p" {:class "note"} d))
+       (h "pre" {:class "cmd"} (command-text tool input))
+       (when (pos? more)
+         (h "p" {:class "note"} (str more " more " (if (= 1 more) "request waits" "requests wait") " after this one.")))
+       (h "div" {:class "row"}
+          (h "button" {:class "primary" :onclick (fn [_] (decide id "allow"))} "Approve")
+          (h "button" {:class "deny" :onclick (fn [_] (decide id "deny"))} "Deny")))))
+
 (defn- view [state {:keys [start dismiss toggle-history] :as actions} !ui]
   (case (:view state)
     :idle      (h "div" {:class "bar"}
@@ -222,8 +252,9 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 (defn mount
   "Mounts the control on the document element and returns `{:host :render :destroy}`.
   `actions` is a map of `:start`, `:stop` (takes the typed note), `:cancel`, `:dismiss`,
-  `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, and `:toggle-commit`
-  and `:jump` (each takes a commit hash)."
+  `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
+  and `:jump` (each takes a commit hash), and `:decide` (takes a permission request id and
+  \"allow\" or \"deny\")."
   [actions]
   (let [^js host (js/document.createElement host-tag)
         shadow   (.attachShadow host #js {:mode "open"})
@@ -240,6 +271,8 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                       (swap! !ui assoc :view (:view state) :ticker nil)
                       (.replaceChildren root
                                         (h "div" {:class "stack"}
+                                           (when (and (seq (:approvals state)) (:decide actions))
+                                             (approval-panel (:approvals state) actions))
                                            (when (and (get-in state [:history :open?])
                                                       (not (#{:recording :starting} (:view state))))
                                              (history-panel (:history state) actions))
