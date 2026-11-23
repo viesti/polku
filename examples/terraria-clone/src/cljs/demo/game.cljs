@@ -1687,6 +1687,11 @@
     (let [{:keys [tiles surface]} (get-in st [:worlds :overworld])]
       (assoc st :fluffies (place-fluffies tiles surface)))))
 
+(defn- quest-friend?
+  "Checks that Fluffy `i` is the lost friend of the quest in progress."
+  [{:keys [quest]} i]
+  (and (= :active (:stage quest)) (= i (:friend quest))))
+
 (defn- toggle-fluffy
   "Makes the nearest Fluffy within `fluffy-reach` of the player follow them, or makes a
   following one stay where it is."
@@ -1701,7 +1706,7 @@
     (if-let [[i f] near]
       (let [follow? (not (:following? f))]
         (-> st
-            (cond-> (and follow? (:red? f)) (assoc-in [:quest :found?] true))
+            (cond-> (and follow? (quest-friend? st i)) (assoc-in [:quest :found?] true))
             (update-in [:fluffies i] assoc :following? follow? :hx (:x f) :hy (:y f))
             (update :popups conj {:text (if follow? "A Fluffy is following you!" "The Fluffy waits here")
                                   :x (:x f) :y (- (:y f) 18) :life 120})))
@@ -1796,11 +1801,12 @@
   [{:keys [realm houses fluffies] :as st}]
   (reduce
    (fn [st [i f]]
-     (let [free (->> (map-indexed vector (:houses st))
+     (let [lost? (quest-friend? st i)
+           free (->> (map-indexed vector (:houses st))
                      (filter (fn [[_ h]]
                                (let [[hx hy] (house-hole h)]
                                  (and (= realm (:realm h)) (nil? (:resident h))
-                                      (or (not (:red? f)) (next-door? st h))
+                                      (or (not lost?) (next-door? st h))
                                       (<= (js/Math.hypot (- hx (:x f)) (- hy (:y f))) settle-reach)))))
                      first)]
        (if-let [[hi h] free]
@@ -1809,11 +1815,11 @@
            (cond-> (-> st
                        (assoc-in [:houses hi :resident] i)
                        (update-in [:fluffies i] assoc :following? false :home hi :hx hx :hy hy))
-             (not (:red? f))
+             (not lost?)
              (-> (add-coins house-reward)
                  (update :popups conj {:text (str "A Fluffy moved in! +" house-reward) :icon :coin
                                        :x hx :y top :life 150}))
-             (:red? f)
+             lost?
              (-> (add-coins quest-reward)
                  (assoc-in [:quest :stage] :done)
                  (update :popups conj {:text (str "Quest complete! The friends are neighbours. +" quest-reward)
@@ -1824,14 +1830,30 @@
      (filter (fn [[_ f]] (and (:following? f) (= realm (:realm f))))
              (map-indexed vector fluffies)))))
 
+(def quest-wait (* 5 60000))
+
 (defn- offer-quest
-  "Lets the Fluffy in the first lived-in house ask for help once no quest has been
-  offered yet."
-  [{:keys [quest houses] :as st}]
-  (if-let [hi (and (nil? quest)
-                   (first (keep-indexed (fn [i h] (when (:resident h) i)) houses)))]
-    (assoc st :quest {:stage :offered :giver hi})
-    st))
+  "Lets the Fluffy of a random lived-in house ask for help at a random moment within
+  `quest-wait` of the game clock, counted from the start or from the last finished
+  quest. Only one quest exists at a time."
+  [{:keys [quest houses next-quest-at clock] :as st}]
+  (let [clock (or clock 0)
+        homes (keep-indexed (fn [i h] (when (:resident h) i)) houses)]
+    (cond
+      (= :done (:stage quest))
+      (assoc st :quest nil :next-quest-at (+ clock (* quest-wait (js/Math.random))))
+
+      (or quest (empty? homes)) st
+
+      (nil? next-quest-at)
+      (assoc st :next-quest-at (+ clock (* quest-wait (js/Math.random))))
+
+      (>= clock next-quest-at)
+      (-> st
+          (assoc :quest {:stage :offered :giver (rand-nth homes)})
+          (dissoc :next-quest-at))
+
+      :else st)))
 
 (defn- quest-giver-near?
   "Checks that the player stands close enough to the house that offers the quest to
