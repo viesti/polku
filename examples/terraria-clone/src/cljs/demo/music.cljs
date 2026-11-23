@@ -17,7 +17,8 @@
    :boss-ground {:file "boss-ground-loop" :loop-end (/ 719360 48000) :sync :boss
                  :fade 0.5 :beat-fade 0.3}
    :boss-throw {:file "boss-throw-loop" :loop-end (/ 719360 48000) :sync :boss
-                :fade 0.5 :beat-fade 0.3}})
+                :fade 0.5 :beat-fade 0.3}
+   :asteroid-drift {:file "asteroid-drift-loop" :loop-end (/ 1917184 48000) :fade 3}})
 
 (def ^:private volume 0.6)
 (def ^:private stop-fade 2)

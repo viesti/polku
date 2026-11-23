@@ -166,6 +166,17 @@
    :paint-red (paint-can "#e53935" "#ff9a9a")
    :paint-yellow (paint-can "#ffd21a" "#fff1a0")
    :paint-blue (paint-can "#2f6fe0" "#9cc0ff")
+   :star {:palette {\o "#9a6a00" \y "#ffd54a" \c "#fff6c0"}
+          :rows ["....oo...."
+                 "....yy...."
+                 "...oyyo..."
+                 "oooyccyooo"
+                 "oyyyccyyyo"
+                 ".oyyyyyyo."
+                 "..oyyyyo.."
+                 ".oyyooyyo."
+                 ".oyo..oyo."
+                 ".oo....oo."]}
    :key {:palette {\o "#6b4a00" \y "#ffcc33"}
          :rows [".........."
                 ".ooo......"

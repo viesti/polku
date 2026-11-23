@@ -20,6 +20,7 @@
 (def ooze 7)
 (def slimestone 8)
 (def torch 9)
+(def asteroid 10)
 (def rope-len 10)
 
 (def blocks
@@ -68,7 +69,7 @@
     (>= y H) stone
     :else (aget tiles (idx x y))))
 
-(defn- solid? [t] (or (<= grass t stone) (= t slimestone)))
+(defn- solid? [t] (or (<= grass t stone) (= t slimestone) (= t asteroid)))
 
 (defn- surface-height [x]
   (js/Math.floor (+ (* H 0.32)
@@ -146,7 +147,7 @@
 (def shop-h 5)
 
 (def prices
-  {:torch 5 :rope 5 :bar 10 :potion 10 :ruby 50 :mirror 40})
+  {:torch 5 :rope 5 :star 15 :bar 10 :potion 10 :ruby 50 :mirror 40})
 
 (defn- place-shop!
   "Levels the ground under a shop at a random surface spot away from the spawn point
@@ -295,6 +296,45 @@
     {:tiles tiles :surface surface :chests []
      :gate {:x (* T (inc arena-x0)) :y (* T (- arena-floor 3))}}))
 
+;; outer space is a block of tiles in the middle of the world array that wraps around
+;; at its edges, with empty margins so nothing collides at the array's own edges
+(def space-x0 40)
+(def space-y0 10)
+(def space-w 400)
+(def space-h 100)
+(def space-asteroids 110)
+(def ship-w 64)
+(def ship-h 60)
+
+(defn generate-space
+  "Builds outer space: asteroids floating in empty space, with the spaceship parked on
+  a flat-topped asteroid in the middle. Asteroids keep clear of the edges, so a player
+  wrapping round never lands inside one."
+  []
+  (let [tiles (js/Uint8Array. (* W H))
+        surface (.fill (js/Int32Array. W) H)
+        blob!(fn [cx cy r]
+                (doseq [x (range (- cx r 1) (+ cx r 2))
+                        y (range (- cy r 1) (+ cy r 2))
+                        :when (<= (js/Math.hypot (- x cx) (* 1.3 (- y cy)))
+                                  (+ r -0.3 (* 0.8 (hash2 x y))))]
+                  (aset tiles (idx x y) asteroid)))
+        hx (+ space-x0 (quot space-w 2))
+        hy (+ space-y0 (quot space-h 2) 8)]
+    (doseq [x (range (- hx 6) (+ hx 7))]
+      (aset tiles (idx x hy) asteroid))
+    (blob! hx (+ hy 2) 4)
+    (loop [placed [[hx hy]] tries 0]
+      (when (and (< (count placed) space-asteroids) (< tries 5000))
+        (let [r (+ 2 (rand-int 3))
+              cx (+ space-x0 r 4 (rand-int (- space-w (* 2 r) 8)))
+              cy (+ space-y0 r 4 (rand-int (- space-h (* 2 r) 8)))
+              clear? (every? (fn [[px py]] (> (js/Math.hypot (- px cx) (- py cy)) 11)) placed)]
+          (when clear? (blob! cx cy r))
+          (recur (cond-> placed clear? (conj [cx cy])) (inc tries)))))
+    {:tiles tiles :surface surface :chests [] :size [space-w space-h]
+     :ship {:x (- (* T (+ hx 0.5)) (/ ship-w 2)) :y (- (* T hy) ship-h)}}))
+
 (defn- box-hits? [tiles x y w h]
   (let [x0 (js/Math.floor (/ x T))
         x1 (js/Math.floor (/ (+ x w -0.01) T))
@@ -328,9 +368,14 @@
 (defn- ooze-at? [tiles wx wy]
   (= ooze (tile-at tiles (js/Math.floor (/ wx T)) (js/Math.floor (/ wy T)))))
 
+;; share of normal gravity, and the fastest fall, in outer space
+(def space-g 0.3)
+(def space-fall 5)
+
 (defn- step-free
   "Moves a player who is not on a rope. In ooze the player moves slowly, sinks gently
-  and swims up with Space, hopping out when the head is above the surface."
+  and swims up with Space, hopping out when the head is above the surface. A player
+  marked `:low-g?` falls under `space-g` of normal gravity."
   [tiles p keys dt]
   (let [dir (- (if (keys "KeyD") 1 0) (if (keys "KeyA") 1 0))
         jump? (keys "Space")
@@ -345,9 +390,10 @@
              ;; letting go of Space early gives a shorter jump
              (and (not jump?) (< (:vy p) -3)) -3
              :else (:vy p))
-        vy (if wet?
-             (min 2 (+ vy (* 0.15 dt)))
-             (min max-fall (+ vy (* gravity dt))))
+        vy (cond
+             wet? (min 2 (+ vy (* 0.15 dt)))
+             (:low-g? p) (min space-fall (+ vy (* gravity space-g dt)))
+             :else (min max-fall (+ vy (* gravity dt))))
         dx (* vx dt) dy (* vy dt)
         n (js/Math.ceil (/ (max (js/Math.abs dx) (js/Math.abs dy) 1) 6))
         p (assoc p :vx vx :vy vy
@@ -407,7 +453,8 @@
    leaves ["#2f9e44" "#288a3b"]
    rope ["#c8a165" "#8a6a3a"]
    slimestone ["#56705f" "#4e6757"]
-   torch ["#ffb347" "#8a5a2b"]})
+   torch ["#ffb347" "#8a5a2b"]
+   asteroid ["#6e6478" "#635a6c"]})
 
 (defn- hand [{:keys [x y]}]
   [(+ x (/ player-w 2)) (+ y 22)])
@@ -478,7 +525,8 @@
         (do (aset tiles (idx tx y) air) (recur (inc y) (inc n)))
         n))))
 
-(declare strike-enemies stash portal-aimed? teleport gate-aimed? knock-gate strike-boss)
+(declare strike-enemies stash portal-aimed? teleport gate-aimed? knock-gate strike-boss
+         strike-drone strike-alien here-ship box-aimed? fly-ship)
 
 (defn- swing!
   "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
@@ -493,12 +541,16 @@
       (do (swap! state teleport) true)
 
       (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight"))
+           (when-let [ship (here-ship @state)] (box-aimed? player ship ship-w ship-h)))
+      (do (swap! state fly-ship) true)
+
+      (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight"))
            (= :slime (:realm @state)) (not (:gate-open? @state))
            (gate-aimed? player (get-in @state [:worlds :slime :gate])))
       (do (swap! state knock-gate) true)
 
       (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight")))
-      (let [struck (or (strike-boss state) (strike-enemies state))
+      (let [struck (or (strike-boss state) (strike-drone state) (strike-alien state) (strike-enemies state))
             arena? (= :arena (:realm @state))
             hits (if struck
                    []
@@ -520,7 +572,7 @@
             dug (into [] (keep (fn [[tx ty]]
                                  (let [t (aget tiles (idx tx ty))]
                                    (cond (or (= t grass) (= t dirt)) :dirt
-                                         (or (= t stone) (= t slimestone)) :stone))))
+                                         (or (= t stone) (= t slimestone) (= t asteroid)) :stone))))
                       hits)]
         (doseq [[tx ty] hits]
           (aset tiles (idx tx ty) air))
@@ -701,7 +753,13 @@
               (= t slimestone)
               (when (< (hash2 tx (+ ty 500)) 0.35)
                 (set! (.-fillStyle ctx) "#5f9a4a")
-                (.fillRect ctx (+ sx 2) (+ sy 3) 6 3))))
+                (.fillRect ctx (+ sx 2) (+ sy 3) 6 3))
+              (= t asteroid)
+              (when (< (hash2 tx (+ ty 500)) 0.4)
+                (set! (.-fillStyle ctx) "#4a4252")
+                (.fillRect ctx (+ sx 4) (+ sy 5) 4 4)
+                (set! (.-fillStyle ctx) "#8c8296")
+                (.fillRect ctx (+ sx 4) (+ sy 4) 4 1))))
           (> ty (aget surface tx))
           (cave-bg))))
 
@@ -1638,6 +1696,7 @@
                          (fn [st]
                            (-> st
                                (dissoc :boss)
+                               (assoc :goo-beaten? true)
                                (update :particles into
                                        (mapcat #(puff % "#8fe86b" 8) (filter :minion? (:enemies st))))
                                (update :enemies #(filterv (complement :minion?) %))
@@ -1655,6 +1714,461 @@
                                        {:text "A portal back opened in the middle of the arena"
                                         :x (+ x (/ boss-w 2)) :y (- y 32) :life 200}))))
                   :loot))))))))
+
+(def drone-w 28)
+(def drone-h 14)
+(def drone-count 3)
+(def drone-hp 3)
+(def drone-reward 20)
+;; how far above the ground drones cruise, in tiles
+(def drone-alt 14)
+
+(defn- ground-row
+  "Returns the row of the highest solid tile in column `tx`."
+  [^js tiles tx]
+  (let [tx (max 0 (min (dec W) tx))]
+    (loop [y 0]
+      (if (or (>= y (dec H)) (solid? (aget tiles (idx tx y)))) y (recur (inc y))))))
+
+(defn- cruise-y [^js tiles x]
+  (* T (- (ground-row tiles (js/Math.floor (/ x T))) drone-alt)))
+
+(defn- new-drone [tiles px]
+  (let [x (max (* 2 T) (min (* T (- W 3)) (+ px (* (if (< (js/Math.random) 0.5) -1 1) (+ 500 (* 300 (js/Math.random)))))))]
+    {:x x :y (cruise-y tiles x) :vx (if (< (js/Math.random) 0.5) -1.2 1.2)
+     :mode :high :timer (+ 600 (* 1200 (js/Math.random))) :hp drone-hp :flash 0}))
+
+(defn- step-drone
+  "Moves drone `d` one frame. A cruising drone patrols the sky near the player at
+  `px` and, when its timer runs out and `busy?` is false, dives to the ground near the
+  player, sits there for a while and climbs back up."
+  [tiles {:keys [x y vx mode timer] :as d} px dt busy?]
+  (let [d (assoc d :flash (max 0 (- (:flash d 0) dt)) :timer (- timer dt))
+        toward (fn [d tx ty speed]
+                 (let [dx (- tx (:x d)) dy (- ty (:y d)) dist (js/Math.hypot dx dy)
+                       step (* speed dt)]
+                   (if (<= dist step)
+                     [(assoc d :x tx :y ty) true]
+                     [(assoc d :x (+ (:x d) (* step (/ dx dist))) :y (+ (:y d) (* step (/ dy dist)))) false])))]
+    (case mode
+      :high
+      (let [vx (cond (or (> (- x px) 700) (> x (* T (- W 3)))) (- (js/Math.abs vx))
+                     (or (< (- x px) -700) (< x (* 2 T))) (js/Math.abs vx)
+                     :else vx)
+            x (if (> (js/Math.abs (- x px)) 1400) (- px (* 600 (js/Math.sign vx))) (+ x (* vx dt)))
+            ty (cruise-y tiles x)
+            d (assoc d :vx vx :x x :y (+ y (* (min 1 (* 0.05 dt)) (- ty y))))]
+        (cond
+          (pos? (:timer d)) d
+          busy? (assoc d :timer 300)
+          :else (let [tx (max (* 2 T) (min (* T (- W 3)) (+ px (- (* 640 (js/Math.random)) 320))))
+                      col (js/Math.floor (/ (+ tx (/ drone-w 2)) T))]
+                  (assoc d :mode :dive :tx tx :ty (- (* T (ground-row tiles col)) drone-h)))))
+
+      :dive
+      (let [[d there?] (toward d (:tx d) (:ty d) 3)]
+        (if there? (assoc d :mode :ground :timer 600) d))
+
+      :ground
+      (if (pos? (:timer d)) d (assoc d :mode :rise))
+
+      :rise
+      (let [ty (cruise-y tiles x)
+            [d there?] (toward d x ty 2)]
+        (if there? (assoc d :mode :high :timer (+ 900 (* 1200 (js/Math.random)))) d)))))
+
+(defn- step-sky
+  "Keeps `drone-count` drones flying over the overworld once the Lord of Goo is beaten,
+  and lowers a landing spaceship to the ground."
+  [{:keys [goo-beaten? realm drones player ship] :as st} dt]
+  (if (= realm :overworld)
+    (let [tiles (get-in st [:worlds :overworld :tiles])
+          px (+ (:x player) (/ player-w 2))
+          drones (cond-> (or drones [])
+                   (and goo-beaten? (< (count drones) drone-count)) (conj (new-drone tiles px)))
+          busy? (some #(#{:dive :ground} (:mode %)) drones)
+          st (assoc st :drones (mapv #(step-drone tiles % px dt busy?) drones))]
+      (if (:landing? ship)
+        (let [y (+ (:y ship) (* 2.5 dt))]
+          (if (>= y (:ty ship))
+            (-> st
+                (assoc :ship (-> ship (assoc :y (:ty ship)) (dissoc :landing? :ty)))
+                (update :particles into
+                        (for [i (range 20)]
+                          {:x (+ (:x ship) (* ship-w (js/Math.random))) :y (+ (:ty ship) ship-h -2)
+                           :vx (- (* 6 (js/Math.random)) 3) :vy (- (* -2 (js/Math.random)) 0.5)
+                           :life (+ 25 (* 20 (js/Math.random))) :color "rgba(220,210,190,0.9)" :i i})))
+            (assoc-in st [:ship :y] y)))
+        st))
+    st))
+
+(defn- box-aimed?
+  "Checks that the mouse points at the box at `x`, `y` of size `w` by `h` and that the
+  box is within reach of the hand."
+  [{:keys [aim-at] :as p} {:keys [x y]} w h]
+  (when aim-at
+    (let [[hx hy] (hand p)
+          [ax ay] aim-at]
+      (and (<= (- x 4) ax (+ x w 4))
+           (<= (- y 4) ay (+ y h 4))
+           (<= (js/Math.hypot (- (max x (min hx (+ x w))) hx) (- (max y (min hy (+ y h))) hy))
+               (+ reach 8))))))
+
+(defn- land-ship
+  "Sends a spaceship down to the surface 30 to 60 tiles to one side of the player."
+  [{:keys [player] :as st}]
+  (let [tiles (get-in st [:worlds :overworld :tiles])
+        ptx (js/Math.floor (/ (:x player) T))
+        side (if (< (js/Math.random) 0.5) -1 1)
+        off (+ 30 (rand-int 31))
+        c (+ ptx (* side off))
+        [side c] (if (< 8 c (- W 9)) [side c] [(- side) (- ptx (* side off))])
+        c (max 8 (min (- W 9) c))
+        row (apply min (map #(ground-row tiles %) (range (- c 2) (+ c 2))))
+        ty (- (* T row) ship-h)]
+    (-> st
+        (assoc :ship {:x (* T (- c 2)) :y (- ty 700) :ty ty :landing? true})
+        (update :popups conj {:text (str "A spaceship is landing to the " (if (pos? side) "east" "west") "!")
+                              :x (+ (:x player) (/ player-w 2)) :y (- (:y player) 30) :life 240}))))
+
+(defn- strike-drone
+  "Hits the drone sitting on the ground that the pickaxe points at. Breaking one pays
+  `drone-reward` coins and brings down the spaceship when none has landed yet. Returns
+  nil when no grounded drone is aimed at, `:loot` when it breaks and `:hit` otherwise."
+  [state]
+  (let [{:keys [player drones realm]} @state
+        i (when (= realm :overworld)
+            (first (keep-indexed (fn [i d] (when (and (= :ground (:mode d))
+                                                      (box-aimed? player d drone-w drone-h))
+                                             i))
+                                 drones)))]
+    (when i
+      (let [{:keys [x y hp]} (get drones i)
+            sparks (fn [n] (for [k (range n)]
+                             {:x (+ x (* drone-w (js/Math.random))) :y (+ y (* drone-h (js/Math.random)))
+                              :vx (- (* 4 (js/Math.random)) 2) :vy (- (* -3 (js/Math.random)) 1)
+                              :life (+ 15 (* 20 (js/Math.random))) :color (if (even? k) "#ffd54a" "#9aa3ad") :i k}))]
+        (if (> hp 1)
+          (do (swap! state #(-> %
+                                (update-in [:drones i] assoc :hp (dec hp) :flash 8)
+                                (update :particles into (sparks 6))))
+              :hit)
+          (do (swap! state
+                     (fn [st]
+                       (cond-> (-> st
+                                   (update :drones (fn [ds] (into (subvec ds 0 i) (subvec ds (inc i)))))
+                                   (add-coins drone-reward)
+                                   (update :particles into (sparks 18))
+                                   (update :popups conj {:text (str "Drone destroyed! +" drone-reward) :icon :coin
+                                                         :x (+ x (/ drone-w 2)) :y (- y 10) :life 150}))
+                         (nil? (:ship st)) land-ship)))
+              :loot))))))
+
+(defn- here-ship
+  "Returns the spaceship standing in the realm the player is in, or nil."
+  [{:keys [realm ship] :as st}]
+  (case realm
+    :overworld (when (and ship (not (:landing? ship))) ship)
+    :space (get-in st [:worlds :space :ship])
+    nil))
+
+(defn- add-space
+  "Gives the game an outer space, replacing one built at an older size."
+  [st]
+  (if (= [space-w space-h] (get-in st [:worlds :space :size]))
+    st
+    (-> st
+        (assoc-in [:worlds :space] (generate-space))
+        (dissoc :aliens :stars))))
+
+(defn- fly-ship
+  "Takes the player aboard the spaceship to the other end of its trip: from the
+  overworld to outer space, or back home."
+  [{:keys [realm] :as st}]
+  (let [to (if (= realm :space) :overworld :space)
+        st (switch-realm (add-space st) to)
+        {:keys [x y]} (here-ship st)
+        px (- (+ x (/ ship-w 2)) (/ player-w 2))]
+    (-> st
+        (update :player assoc :x px :y (- (+ y ship-h) player-h 0.5)
+                :vx 0 :vy 0 :climbing? false :swing swing-frames :low-g? (= to :space))
+        (update :popups conj {:text (if (= to :space) "Outer space! Gravity is weak here" "Back home")
+                              :x (+ x (/ ship-w 2)) :y (- y 14) :life 180}))))
+
+(defn- wrap-space
+  "Brings a player who leaves outer space over one edge back in over the opposite edge."
+  [{:keys [x y] :as p}]
+  (let [x0 (* T space-x0) wpx (* T space-w)
+        y0 (* T space-y0) hpx (* T space-h)
+        cx (+ x (/ player-w 2))
+        cy (+ y (/ player-h 2))]
+    (cond-> p
+      (< cx x0) (update :x + wpx)
+      (>= cx (+ x0 wpx)) (update :x - wpx)
+      (< cy y0) (update :y + hpx)
+      (>= cy (+ y0 hpx)) (update :y - hpx))))
+
+(defn- wrap-delta
+  "Returns the shortest signed distance `d` along an axis that wraps every `n` pixels."
+  [d n]
+  (- (mod (+ d (/ n 2)) n) (/ n 2)))
+
+(defn- space-offsets
+  "Returns the shifts at which outer space is drawn so that the view shows its wrapped
+  copies across the seams."
+  []
+  (let [wpx (* T space-w) hpx (* T space-h)]
+    (for [ox [(- wpx) 0 wpx] oy [(- hpx) 0 hpx]] [ox oy])))
+
+(def alien-w 24)
+(def alien-h 20)
+(def alien-count 10)
+(def alien-hp 3)
+(def alien-reward 8)
+(def alien-sight 450)
+(def star-count 30)
+(def star-item {:id :star :name "Star"})
+
+(defn- open-spot
+  "Returns a random point in outer space where a `w` by `h` box touches no asteroid
+  and lies at least `away` pixels from (`px`, `py`) the wrapped way round."
+  [tiles w h px py away]
+  (loop [n 0]
+    (let [x (+ (* T (+ space-x0 2)) (* (js/Math.random) (* T (- space-w 4))))
+          y (+ (* T (+ space-y0 2)) (* (js/Math.random) (* T (- space-h 4))))
+          far? (> (js/Math.hypot (wrap-delta (- x px) (* T space-w))
+                                 (wrap-delta (- y py) (* T space-h)))
+                  away)]
+      (cond
+        (and far? (not (box-hits? tiles (- x 4) (- y 4) (+ w 8) (+ h 8)))) [x y]
+        (< n 60) (recur (inc n))
+        :else nil))))
+
+(defn- step-alien
+  "Moves alien `a` one frame. It floats through the asteroids, drifting idly until the
+  player comes within `alien-sight`, then floats after the player."
+  [{:keys [x y vx vy] :as a} px py dt]
+  (let [dx (wrap-delta (- px (+ x (/ alien-w 2))) (* T space-w))
+        dy (wrap-delta (- py (+ y (/ alien-h 2))) (* T space-h))
+        d (max 1 (js/Math.hypot dx dy))
+        chase? (< d alien-sight)
+        [ax ay] (if chase?
+                  [(* 0.05 (/ dx d)) (* 0.05 (/ dy d))]
+                  [(* 0.04 (- (js/Math.random) 0.5)) (* 0.04 (- (js/Math.random) 0.5))])
+        top (if chase? 1.6 0.7)
+        vx (+ vx (* ax dt)) vy (+ vy (* ay dt))
+        s (js/Math.hypot vx vy)
+        [vx vy] (if (> s top) [(* vx (/ top s)) (* vy (/ top s))] [vx vy])
+        x0 (* T space-x0) y0 (* T space-y0)]
+    (assoc a :vx vx :vy vy
+           :x (+ x0 (mod (- (+ x (* vx dt)) x0) (* T space-w)))
+           :y (+ y0 (mod (- (+ y (* vy dt)) y0) (* T space-h)))
+           :flash (max 0 (- (:flash a 0) dt)))))
+
+(defn- step-space
+  "Keeps `alien-count` aliens and `star-count` stars in outer space, moves the aliens,
+  hurts the player on an alien's touch and collects the stars the player touches."
+  [{:keys [realm player aliens stars] :as st} dt]
+  (if (not= realm :space)
+    st
+    (let [tiles (get-in st [:worlds :space :tiles])
+          px (+ (:x player) (/ player-w 2))
+          py (+ (:y player) (/ player-h 2))
+          aliens (or aliens [])
+          aliens (if-let [[x y] (and (< (count aliens) alien-count) (open-spot tiles alien-w alien-h px py 600))]
+                   (conj aliens {:x x :y y :vx 0 :vy 0 :hp alien-hp :flash 0 :phase (* 6 (js/Math.random))})
+                   aliens)
+          aliens (mapv #(step-alien % px py dt) aliens)
+          new-star #(when-let [[x y] (open-spot tiles 14 14 px py 300)]
+                      {:x (+ x 7) :y (+ y 7) :phase (* 6 (js/Math.random))})
+          ;; space starts full of stars, and a collected one comes back every 5 seconds
+          stars (or stars (into [] (keep (fn [_] (new-star))) (range star-count)))
+          star-in (- (:star-in st 0) dt)
+          [stars star-in] (if-let [s (and (< (count stars) star-count) (<= star-in 0) (new-star))]
+                            [(conj stars s) 300]
+                            [stars star-in])
+          near? (fn [x y r] (< (js/Math.hypot (wrap-delta (- x px) (* T space-w))
+                                              (wrap-delta (- y py) (* T space-h)))
+                               r))
+          got (count (filter #(near? (:x %) (:y %) 22) stars))
+          stars (filterv #(not (near? (:x %) (:y %) 22)) stars)
+          touching (when (<= (:hurt player 0) 0)
+                     (first (filter #(near? (+ (:x %) (/ alien-w 2)) (+ (:y %) (/ alien-h 2)) 22) aliens)))]
+      (cond-> (assoc st :aliens aliens :stars stars :star-in star-in)
+        (pos? got)
+        (-> (stash [(assoc star-item :count got)])
+            (update :popups conj {:text (str "+" got " Star") :icon :star :x px :y (- (:y player) 10) :life 90}))
+        touching
+        (update :player assoc
+                :vx (if (neg? (wrap-delta (- (+ (:x touching) (/ alien-w 2)) px) (* T space-w))) 6 -6)
+                :vy -3 :hurt 50 :climbing? false
+                :hp (max 0 (- (:hp player max-hp) 1)))))))
+
+(defn- strike-alien
+  "Hits the alien the pickaxe points at. Returns nil when no alien is aimed at, `:loot`
+  when it dies and pays `alien-reward` coins, and `:hit` otherwise."
+  [state]
+  (let [{:keys [player aliens realm]} @state
+        px (+ (:x player) (/ player-w 2))
+        py (+ (:y player) (/ player-h 2))
+        near (fn [a] (assoc a
+                            :x (+ px (wrap-delta (- (:x a) px) (* T space-w)))
+                            :y (+ py (wrap-delta (- (:y a) py) (* T space-h)))))
+        i (when (= realm :space)
+            (first (keep-indexed (fn [i a] (when (box-aimed? player (near a) alien-w alien-h) i)) aliens)))]
+    (when i
+      (let [{:keys [hp] :as a} (get aliens i)
+            {:keys [x y]} (near a)
+            goo (fn [n] (for [k (range n)]
+                          {:x (+ x (* alien-w (js/Math.random))) :y (+ y (* alien-h (js/Math.random)))
+                           :vx (- (* 4 (js/Math.random)) 2) :vy (- (* 4 (js/Math.random)) 2)
+                           :life (+ 15 (* 20 (js/Math.random))) :color (if (even? k) "#b06cff" "#7cff9a") :i k}))]
+        (if (> hp 1)
+          (do (swap! state #(-> %
+                                (update-in [:aliens i] assoc :hp (dec hp) :flash 8
+                                           :vx (if (< x px) -3 3) :vy -1)
+                                (update :particles into (goo 6))))
+              :hit)
+          (do (swap! state #(-> %
+                                (update :aliens (fn [as] (into (subvec as 0 i) (subvec as (inc i)))))
+                                (add-coins alien-reward)
+                                (update :particles into (goo 16))
+                                (update :popups conj {:text (str "+" alien-reward) :icon :coin
+                                                      :x (+ x (/ alien-w 2)) :y (- y 8) :life 90})))
+              :loot))))))
+
+(defn- draw-aliens [^js ctx aliens t cam-x cam-y]
+  (doseq [{:keys [x y flash phase]} aliens
+          :let [bob (* 2 (js/Math.sin (+ (/ t 300) phase)))
+                sx (js/Math.round (- x cam-x))
+                sy (js/Math.round (+ (- y cam-y) bob))
+                cx (+ sx (/ alien-w 2))]]
+    (set! (.-strokeStyle ctx) "#7a3fc4")
+    (set! (.-lineWidth ctx) 2)
+    (doseq [side [-1 1]]
+      (.beginPath ctx)
+      (.moveTo ctx (+ cx (* side 4)) (+ sy 5))
+      (.lineTo ctx (+ cx (* side 8)) (- sy 3))
+      (.stroke ctx))
+    (disc ctx "#7cff9a" (- cx 8) (- sy 3) 2)
+    (disc ctx "#7cff9a" (+ cx 8) (- sy 3) 2)
+    (set! (.-fillStyle ctx) (if (pos? flash) "#ffffff" "#b06cff"))
+    (.beginPath ctx)
+    (.ellipse ctx cx (+ sy 10) (/ alien-w 2) (/ alien-h 2) 0 0 (* 2 js/Math.PI))
+    (.fill ctx)
+    (set! (.-fillStyle ctx) "#8a4be0")
+    (doseq [k (range 4)]
+      (.fillRect ctx (+ sx 3 (* k 5)) (+ sy alien-h -3) 3 (+ 3 (js/Math.round (* 2 (js/Math.sin (+ (/ t 120) k phase)))))))
+    (disc ctx "#ffffff" cx (+ sy 9) 5)
+    (disc ctx "#1a0a33" (+ cx 1) (+ sy 9) 2.5)))
+
+(defn- draw-stars [^js ctx stars t cam-x cam-y]
+  (doseq [{:keys [x y phase]} stars
+          :let [sx (- x cam-x)
+                sy (+ (- y cam-y) (* 2 (js/Math.sin (+ (/ t 400) phase))))
+                spin (+ (/ t 900) phase)
+                glow (+ 0.25 (* 0.15 (js/Math.sin (+ (/ t 200) phase))))]]
+    (disc ctx (str "rgba(255,230,120," glow ")") sx sy 12)
+    (set! (.-fillStyle ctx) "#ffd54a")
+    (.beginPath ctx)
+    (doseq [k (range 10)
+            :let [a (+ spin (* k (/ js/Math.PI 5)))
+                  r (if (even? k) 8 3.5)]]
+      (if (zero? k)
+        (.moveTo ctx (+ sx (* r (js/Math.cos a))) (+ sy (* r (js/Math.sin a))))
+        (.lineTo ctx (+ sx (* r (js/Math.cos a))) (+ sy (* r (js/Math.sin a))))))
+    (.closePath ctx)
+    (.fill ctx)
+    (disc ctx "#fff6c0" sx sy 2)))
+
+(defn- draw-drones [^js ctx drones t cam-x cam-y]
+  (doseq [{:keys [x y flash mode]} drones
+          :let [sx (js/Math.round (- x cam-x))
+                sy (js/Math.round (- y cam-y))]]
+    (set! (.-fillStyle ctx) "#3b4048")
+    (.fillRect ctx (+ sx 2) (+ sy 2) 4 3)
+    (.fillRect ctx (+ sx drone-w -6) (+ sy 2) 4 3)
+    (set! (.-fillStyle ctx) "rgba(200,210,220,0.8)")
+    (let [spin (js/Math.abs (js/Math.sin (/ t 30)))
+          blade (+ 2 (* 7 spin))]
+      (doseq [cx [(+ sx 4) (+ sx drone-w -4)]]
+        (.fillRect ctx (- cx blade) sy (* 2 blade) 2)))
+    (set! (.-fillStyle ctx) (if (pos? flash) "#ffffff" "#7d8794"))
+    (.beginPath ctx)
+    (.roundRect ctx (+ sx 3) (+ sy 5) (- drone-w 6) 7 3)
+    (.fill ctx)
+    (set! (.-fillStyle ctx) "#1d2228")
+    (.fillRect ctx (+ sx 8) (+ sy 12) 2 2)
+    (.fillRect ctx (+ sx drone-w -10) (+ sy 12) 2 2)
+    (set! (.-fillStyle ctx) "#46e0ff")
+    (.fillRect ctx (+ sx (/ drone-w 2) -2) (+ sy 7) 4 3)
+    (when (or (= mode :ground) (< (mod t 900) 450))
+      (set! (.-fillStyle ctx) "#ff3b3b")
+      (.fillRect ctx (+ sx (/ drone-w 2) -1) (+ sy 3) 2 2))))
+
+(defn- draw-ship
+  "Draws the spaceship as a silver rocket on three legs, with a flame under it while it
+  is landing."
+  [^js ctx {:keys [x y landing?]} t cam-x cam-y]
+  (let [sx (js/Math.round (- x cam-x))
+        sy (js/Math.round (- y cam-y))
+        cx (+ sx (/ ship-w 2))]
+    (when landing?
+      (let [f (* 6 (js/Math.abs (js/Math.sin (/ t 40))))]
+        (set! (.-fillStyle ctx) "#ff7a1a")
+        (.beginPath ctx)
+        (.moveTo ctx (- cx 9) (+ sy 52))
+        (.lineTo ctx (+ cx 9) (+ sy 52))
+        (.lineTo ctx cx (+ sy 74 f))
+        (.fill ctx)
+        (set! (.-fillStyle ctx) "#ffd54a")
+        (.beginPath ctx)
+        (.moveTo ctx (- cx 5) (+ sy 52))
+        (.lineTo ctx (+ cx 5) (+ sy 52))
+        (.lineTo ctx cx (+ sy 64 f))
+        (.fill ctx)))
+    (set! (.-fillStyle ctx) "#5a6270")
+    (doseq [[lx fx] [[(- cx 14) (- cx 26)] [(+ cx 14) (+ cx 26)]]]
+      (.beginPath ctx)
+      (.moveTo ctx lx (+ sy 36))
+      (.lineTo ctx fx (+ sy ship-h))
+      (.lineTo ctx (+ fx (if (< fx cx) 5 -5)) (+ sy ship-h))
+      (.lineTo ctx lx (+ sy 44))
+      (.fill ctx))
+    (.fillRect ctx (- cx 2) (+ sy 44) 4 16)
+    (set! (.-fillStyle ctx) "#d9dee6")
+    (.beginPath ctx)
+    (.moveTo ctx cx sy)
+    (.quadraticCurveTo ctx (+ cx 16) (+ sy 14) (+ cx 14) (+ sy 50))
+    (.lineTo ctx (- cx 14) (+ sy 50))
+    (.quadraticCurveTo ctx (- cx 16) (+ sy 14) cx sy)
+    (.fill ctx)
+    (set! (.-fillStyle ctx) "#e53935")
+    (.beginPath ctx)
+    (.moveTo ctx cx sy)
+    (.quadraticCurveTo ctx (+ cx 8) (+ sy 5) (+ cx 10) (+ sy 12))
+    (.lineTo ctx (- cx 10) (+ sy 12))
+    (.quadraticCurveTo ctx (- cx 8) (+ sy 5) cx sy)
+    (.fill ctx)
+    (.fillRect ctx (- cx 14) (+ sy 46) 28 4)
+    (disc ctx "#2b3a55" cx (+ sy 25) 6)
+    (disc ctx "#7fd4ff" cx (+ sy 25) 4)
+    (set! (.-fillStyle ctx) "#ffffff")
+    (.fillRect ctx (- cx 2) (+ sy 22) 2 2)))
+
+(defn- draw-space-sky
+  "Draws black space with steady stars behind everything already on the canvas."
+  [^js ctx vw vh cam-x cam-y]
+  (set! (.-globalCompositeOperation ctx) "destination-over")
+  (doseq [i (range 160)]
+    (let [sx (mod (- (* (hash2 i 71) 2400) (* cam-x 0.1)) vw)
+          sy (mod (- (* (hash2 i 13) 1600) (* cam-y 0.1)) vh)
+          big? (< (hash2 i 5) 0.12)]
+      (set! (.-fillStyle ctx) (if (< (hash2 i 3) 0.2) "#ffe9b0" "#e8eeff"))
+      (.fillRect ctx (js/Math.round sx) (js/Math.round sy) (if big? 2 1) (if big? 2 1))))
+  (set! (.-fillStyle ctx) "#05060d")
+  (.fillRect ctx 0 0 vw vh)
+  (set! (.-globalCompositeOperation ctx) "source-over"))
 
 (defn- draw-gate
   "Draws a stone arch with an iron gate. An open gate shows a glowing passage."
@@ -2313,6 +2827,9 @@
      ($ :li "Rare blue Fluffies hide in caves around the world; press E next to one to make it follow you, and E again to let it wait")
      ($ :li "Buy a Fluffy House at the shop and place it on the ground from the bag; a Fluffy following you moves into an empty house and pays you " house-reward " coins")
      ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")
+     ($ :li "Once the Lord of Goo is beaten, drones fly over the overworld and now and then land; break a landed drone with the pickaxe and a spaceship comes down somewhere nearby")
+     ($ :li "Hit the spaceship with the pickaxe to fly to outer space, where gravity is weak and you can hop between asteroids; space wraps round, so flying on past one edge brings you in over the opposite one. Hit the ship again to fly home")
+     ($ :li "Purple aliens float after you in space and hurt on touch; three pickaxe hits pop one for " alien-reward " coins. Touch the gold stars to collect them and sell them at the shop")
      ($ :li "Find the shop on the surface to sell your finds and buy potions, rope and torches")))
 
 (defn- ->b64 [^js arr]
@@ -2629,7 +3146,8 @@
 
 (defui mini-map
   "Draws the overworld one pixel per tile, refreshed twice a second, with every
-  Fluffy in the overworld as a blue dot and the player as a white dot."
+  Fluffy in the overworld as a dot of its colour, the spaceship as a silver dot and the
+  player as a white dot."
   [{:keys [state-ref]}]
   (let [canvas-ref (use-ref nil)]
     (use-effect
@@ -2661,6 +3179,9 @@
                           (doseq [f (sort-by :red? (:fluffies st)) :when (= :overworld (:realm f))]
                             (dot (:x f) (:y f) (if (:red? f) 4.5 3.5) "#ffffff")
                             (dot (:x f) (:y f) (if (:red? f) 3.5 2.5) (second (fluffy-colors f))))
+                          (when-let [{:keys [x y]} (:ship st)]
+                            (dot (+ x (/ ship-w 2)) (+ y (/ ship-h 2)) 4 "#111111")
+                            (dot (+ x (/ ship-w 2)) (+ y (/ ship-h 2)) 3 "#d9dee6"))
                           (when (= :overworld (:realm st))
                             (let [{:keys [x y]} (:player st)]
                               (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 3 "#111111")
@@ -2837,15 +3358,22 @@
                              shop (:shop home)
                              dt (if @last-t (min 2 (/ (- t @last-t) 16.667)) 1)
                              _ (reset! last-t t)
+                             space? (= :space (:realm @state))
                              player (:player (swap! state update :player
-                                                    #(step-player (:tiles (here)) % (:keys @state) dt)))
+                                                    #(cond-> (step-player (:tiles (here)) % (:keys @state) dt)
+                                                       space? wrap-space)))
                              dpr (render-scale)
                              vw js/window.innerWidth
                              vh js/window.innerHeight
-                             cam-x (-> (- (+ (:x player) (/ player-w 2)) (/ vw 2))
-                                       (max 0) (min (- (* W T) vw)))
-                             cam-y (-> (- (:y player) (* vh 0.42))
-                                       (max 0) (min (- (* H T) vh)))
+                             ;; space wraps round, so its camera follows the player without stopping at edges
+                             cam-x (if space?
+                                     (- (+ (:x player) (/ player-w 2)) (/ vw 2))
+                                     (-> (- (+ (:x player) (/ player-w 2)) (/ vw 2))
+                                         (max 0) (min (- (* W T) vw))))
+                             cam-y (if space?
+                                     (- (+ (:y player) (/ player-h 2)) (/ vh 2))
+                                     (-> (- (:y player) (* vh 0.42))
+                                         (max 0) (min (- (* H T) vh))))
                              _ (when-let [[mx my] (:mouse @state)]
                                  (swap! state update :player
                                         (fn [p]
@@ -2864,17 +3392,19 @@
                                                        nil :slime-hollow
                                                        (:leap :perch) :boss-throw
                                                        :boss-ground)
+                                              :space :asteroid-drift
                                               nil))
                              _ (swing! state (:tiles (here)) dt)
-                                       ;; the Slime Dimension stays as dark as night; the arena is dimly lit
-                             light (case (:realm @state) :overworld (:light tod) :arena 0.45 0.15)
+                             ;; the Slime Dimension stays as dark as night; the arena is dimly lit, and
+                             ;; space is bright enough that no slimes come out
+                             light (case (:realm @state) :overworld (:light tod) :arena 0.45 :space 0.8 0.15)
                              world (here)
                              _ (when-let [levels (:levels world)]
                                  (swap! flips not)
                                  (flow-ooze! (:tiles world) levels @flips))
                              _ (step-enemies! state (:tiles world) (:surface world) light dt)
                              _ (step-boss! state (:tiles world) dt)
-                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest))
+                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt)))
                              _ (set-quest! (:quest @state))
                              _ (when (and (= :slime (:realm @state)) (:gate-open? @state)
                                           (touching? player (assoc (:gate world) :w gate-w :h gate-h)))
@@ -2907,32 +3437,45 @@
                          (set! (.-imageSmoothingEnabled ctx) false)
                          (.clearRect ctx 0 0 vw vh)
                          (when (home?) (draw-hills ctx vw vh cam-x cam-y))
-                         (draw-tiles ctx (:tiles world) (:surface world) vw vh cam-x cam-y)
-                         (when (home?) (draw-shop ctx shop vw cam-x cam-y))
-                         (draw-chests ctx chests vw vh cam-x cam-y)
-                         (draw-gate ctx (:gate world) (and (= :slime (:realm @state)) (:gate-open? @state))
-                                    t cam-x cam-y)
-                         (draw-portal ctx portal t cam-x cam-y)
-                         (draw-target ctx (:tiles world) player cam-x cam-y)
-                         (draw-enemies ctx enemies t vw vh cam-x cam-y)
-                         (when-let [boss (:boss @state)] (draw-boss ctx boss t cam-x cam-y))
-                         (draw-houses ctx (:houses @state) (:realm @state) cam-x cam-y)
-                         (draw-fluffies ctx (:fluffies @state) (:realm @state) clock cam-x cam-y)
-                         (draw-house-rims ctx (:houses @state) (:realm @state) cam-x cam-y)
-                         (when (even? (js/Math.floor (/ (:hurt player 0) 4)))
-                           (draw-player ctx player cam-x cam-y)
-                           (draw-pickaxe ctx player cam-x cam-y))
-                         (when-let [levels (:levels world)]
-                           (draw-ooze ctx (:tiles world) levels vw vh cam-x cam-y t))
-                         (draw-particles ctx particles cam-x cam-y)
+                         (doseq [[ox oy] (if space? (space-offsets) [[0 0]])
+                                 :let [cam-x (- cam-x ox) cam-y (- cam-y oy)]]
+                           (draw-tiles ctx (:tiles world) (:surface world) vw vh cam-x cam-y)
+                           (when space?
+                             (draw-stars ctx (:stars @state) t cam-x cam-y)
+                             (draw-aliens ctx (:aliens @state) t cam-x cam-y))
+                           (when (home?) (draw-shop ctx shop vw cam-x cam-y))
+                           (draw-chests ctx chests vw vh cam-x cam-y)
+                           (draw-gate ctx (:gate world) (and (= :slime (:realm @state)) (:gate-open? @state))
+                                      t cam-x cam-y)
+                           (draw-portal ctx portal t cam-x cam-y)
+                           (draw-target ctx (:tiles world) player cam-x cam-y)
+                           (draw-enemies ctx enemies t vw vh cam-x cam-y)
+                           (when-let [boss (:boss @state)] (draw-boss ctx boss t cam-x cam-y))
+                           (when (home?)
+                             (when-let [ship (:ship @state)] (draw-ship ctx ship t cam-x cam-y))
+                             (draw-drones ctx (:drones @state) t cam-x cam-y))
+                           (when space?
+                             (draw-ship ctx (get-in @state [:worlds :space :ship]) t cam-x cam-y))
+                           (draw-houses ctx (:houses @state) (:realm @state) cam-x cam-y)
+                           (draw-fluffies ctx (:fluffies @state) (:realm @state) clock cam-x cam-y)
+                           (draw-house-rims ctx (:houses @state) (:realm @state) cam-x cam-y)
+                           (when (even? (js/Math.floor (/ (:hurt player 0) 4)))
+                             (draw-player ctx player cam-x cam-y)
+                             (draw-pickaxe ctx player cam-x cam-y))
+                           (when-let [levels (:levels world)]
+                             (draw-ooze ctx (:tiles world) levels vw vh cam-x cam-y t))
+                           (draw-particles ctx particles cam-x cam-y))
                          (when (home?) (draw-depth ctx (:surface world) vw vh cam-y))
                          (draw-night ctx vw vh
                                      (- (+ (:x player) (/ player-w 2)) cam-x)
                                      (- (+ (:y player) (/ player-h 2)) cam-y)
                                      light)
-                         (draw-flames ctx (:tiles world) vw vh cam-x cam-y t light)
-                         (if (home?)
-                           (draw-sky ctx vw vh cam-x t tod)
+                         (doseq [[ox oy] (if space? (space-offsets) [[0 0]])]
+                           (draw-flames ctx (:tiles world) vw vh (- cam-x ox) (- cam-y oy) t light))
+                         (cond
+                           (home?) (draw-sky ctx vw vh cam-x t tod)
+                           space? (draw-space-sky ctx vw vh cam-x cam-y)
+                           :else
                            (do (set! (.-globalCompositeOperation ctx) "destination-over")
                                (set! (.-fillStyle ctx) "#0b120e")
                                (.fillRect ctx 0 0 vw vh)
