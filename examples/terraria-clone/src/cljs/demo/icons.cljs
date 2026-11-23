@@ -4,6 +4,21 @@
   dot is transparent."
   (:require [uix.core :refer [$ defui]]))
 
+(defn- paint-can
+  "Returns the art of a paint pot holding paint of `color` with a `light` drip."
+  [color light]
+  {:palette {\o "#3a3a44" \m "#b8b8c4" \p color \h light}
+   :rows [".........."
+          "...oooo..."
+          "..o....o.."
+          ".oooooooo."
+          ".ommmmmmmo"
+          ".ohppppppo"
+          ".ohpppppho"
+          ".opppppppo"
+          ".ommmmmmmo"
+          "..oooooo.."]})
+
 (def ^:private art
   {:coin {:palette {\o "#7a4e00" \g "#ffc61a" \h "#fff1a0" \d "#d99400"}
           :rows ["..oooooo.."
@@ -148,6 +163,9 @@
                   ".wwwhhwww."
                   ".ssssssss."
                   "....pp...."]}
+   :paint-red (paint-can "#e53935" "#ff9a9a")
+   :paint-yellow (paint-can "#ffd21a" "#fff1a0")
+   :paint-blue (paint-can "#2f6fe0" "#9cc0ff")
    :key {:palette {\o "#6b4a00" \y "#ffcc33"}
          :rows [".........."
                 ".ooo......"

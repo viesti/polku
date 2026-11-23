@@ -19,6 +19,7 @@
 (def rope 6)
 (def ooze 7)
 (def slimestone 8)
+(def torch 9)
 (def rope-len 10)
 
 (def blocks
@@ -145,7 +146,7 @@
 (def shop-h 5)
 
 (def prices
-  {:torch 2 :rope 3 :bar 10 :potion 15 :ruby 50 :mirror 40})
+  {:torch 5 :rope 5 :bar 10 :potion 10 :ruby 50 :mirror 40})
 
 (defn- place-shop!
   "Levels the ground under a shop at a random surface spot away from the spawn point
@@ -405,13 +406,14 @@
    trunk ["#7a4a24" "#6c4120"]
    leaves ["#2f9e44" "#288a3b"]
    rope ["#c8a165" "#8a6a3a"]
-   slimestone ["#56705f" "#4e6757"]})
+   slimestone ["#56705f" "#4e6757"]
+   torch ["#ffb347" "#8a5a2b"]})
 
 (defn- hand [{:keys [x y]}]
   [(+ x (/ player-w 2)) (+ y 22)])
 
 (defn dig-targets
-  "Returns the first solid or rope tile within `reach` on the line from the player's
+  "Returns the first solid, rope or torch tile within `reach` on the line from the player's
   hand toward `:aim-at`, the mouse position in world coordinates."
   [tiles {:keys [aim-at] :as p}]
   (when aim-at
@@ -424,7 +426,7 @@
           (when (<= step reach)
             (let [tx (js/Math.floor (/ (+ hx (* dx (/ step d))) T))
                   ty (js/Math.floor (/ (+ hy (* dy (/ step d))) T))]
-              (if (let [t (tile-at tiles tx ty)] (or (solid? t) (= rope t)))
+              (if (let [t (tile-at tiles tx ty)] (or (solid? t) (= rope t) (= torch t)))
                 [[tx ty]]
                 (recur (+ step 2))))))))))
 
@@ -481,7 +483,7 @@
 (defn- swing!
   "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
   or breaks the targeted tile when it reaches none. Hitting a rope takes the whole rope
-  back into the bag. Returns true when the inventory changed."
+  back into the bag, and hitting a torch takes the torch back. Returns true when the inventory changed."
   [state ^js tiles dt]
   (let [{:keys [player keys mouse-down?]} @state
         left (max 0 (- (:swing player 0) dt))]
@@ -514,6 +516,7 @@
                            :life 40 :color color}))
             ropes (filterv (fn [[tx ty]] (= rope (aget tiles (idx tx ty)))) hits)
             pieces (reduce + (map (fn [[tx ty]] (take-rope! tiles tx ty)) ropes))
+            torches (count (filter (fn [[tx ty]] (= torch (aget tiles (idx tx ty)))) hits))
             dug (into [] (keep (fn [[tx ty]]
                                  (let [t (aget tiles (idx tx ty))]
                                    (cond (or (= t grass) (= t dirt)) :dirt
@@ -534,8 +537,12 @@
                                            :count pieces)])
                             (update :popups conj
                                     (let [[tx ty] (first ropes)]
-                                      {:text (str "+" pieces " Rope") :icon :rope :x (* T (+ tx 0.5)) :y (* T ty) :life 90})))))
-        (or (= struck :loot) (boolean (seq ropes))))
+                                      {:text (str "+" pieces " Rope") :icon :rope :x (* T (+ tx 0.5)) :y (* T ty) :life 90})))
+                        (pos? torches)
+                        (stash [(assoc (select-keys (first (filter (fn [i] (= :torch (:id i))) loot))
+                                                    [:id :name :icon])
+                                       :count torches)])))
+        (or (= struck :loot) (boolean (seq ropes)) (pos? torches)))
       :else (do (swap! state assoc-in [:player :swing] left) false))))
 
 (defn- step-particles [ps dt]
@@ -655,6 +662,15 @@
                       (.fillRect ctx sx sy T T))]
         (cond
           (= t ooze) (cave-bg)
+
+          ;; the flame is drawn each frame by `draw-flames`
+          (= t torch)
+          (do (when (> ty (aget surface tx))
+                (cave-bg))
+              (set! (.-fillStyle ctx) "#8a5a2b")
+              (.fillRect ctx (+ sx 7) (+ sy 7) 3 9)
+              (set! (.-fillStyle ctx) "#5a3418")
+              (.fillRect ctx (+ sx 7) (+ sy 7) 3 2))
 
           (= t rope)
           (do (when (> ty (aget surface tx))
@@ -821,6 +837,62 @@
         (when (< (hash2 tx (+ ty (js/Math.floor (/ t 700)))) 0.04)
           (set! (.-fillStyle ctx) "rgba(210,255,160,0.7)")
           (.fillRect ctx (+ sx 6) (+ sy 8) 3 3))))))
+
+(def torch-reach (* 6 T))
+
+(defn- near-torch?
+  "Checks that a torch is within `torch-reach` of the centre of `player`."
+  [^js tiles {:keys [x y]}]
+  (let [cx (+ x (/ player-w 2))
+        cy (+ y (/ player-h 2))
+        r (js/Math.ceil (/ torch-reach T))
+        ptx (js/Math.floor (/ cx T))
+        pty (js/Math.floor (/ cy T))]
+    (loop [ty (- pty r)]
+      (when (<= ty (+ pty r))
+        (or (loop [tx (- ptx r)]
+              (when (<= tx (+ ptx r))
+                (if (and (= torch (tile-at tiles tx ty))
+                         (<= (js/Math.hypot (- (* T (+ tx 0.5)) cx) (- (* T (+ ty 0.5)) cy)) torch-reach))
+                  true
+                  (recur (inc tx)))))
+            (recur (inc ty)))))))
+
+(defn- draw-flames
+  "Draws a flickering flame on each visible torch and a warm glow around it that
+  brightens what is already drawn, more strongly in the dark."
+  [^js ctx ^js tiles vw vh cam-x cam-y t light]
+  (let [x0 (max 0 (js/Math.floor (/ (- cam-x torch-reach) T)))
+        x1 (min (dec W) (js/Math.floor (/ (+ cam-x vw torch-reach) T)))
+        y0 (max 0 (js/Math.floor (/ (- cam-y torch-reach) T)))
+        y1 (min (dec H) (js/Math.floor (/ (+ cam-y vh torch-reach) T)))
+        glow (+ 0.18 (* 0.32 (- 1 light)))]
+    (loop [ty y0]
+      (when (<= ty y1)
+        (loop [tx x0]
+          (when (<= tx x1)
+            (when (= torch (aget tiles (idx tx ty)))
+              (let [sx (js/Math.round (- (* tx T) cam-x))
+                    sy (js/Math.round (- (* ty T) cam-y))
+                    fx (+ sx 8.5)
+                    fy (+ sy 4)
+                    flick (* 0.5 (+ 1 (js/Math.sin (+ (/ t 90) (* 3 tx) ty))))
+                    g (.createRadialGradient ctx fx fy 2 fx fy (+ torch-reach (* 6 flick)))]
+                (.addColorStop g 0 (str "rgba(255,170,70," glow ")"))
+                (.addColorStop g 1 "rgba(255,170,70,0)")
+                (set! (.-globalCompositeOperation ctx) "lighter")
+                (set! (.-fillStyle ctx) g)
+                (.fillRect ctx (- fx torch-reach 6) (- fy torch-reach 6)
+                           (* 2 (+ torch-reach 6)) (* 2 (+ torch-reach 6)))
+                (set! (.-globalCompositeOperation ctx) "source-over")
+                (set! (.-fillStyle ctx) "#ff7a1a")
+                (.fillRect ctx (+ sx 6) (- sy (js/Math.round (* 2 flick)) -2) 5 (+ 5 (js/Math.round (* 2 flick))))
+                (set! (.-fillStyle ctx) "#ffd54a")
+                (.fillRect ctx (+ sx 7) (+ sy 3) 3 4)
+                (set! (.-fillStyle ctx) "#fff6c0")
+                (.fillRect ctx (+ sx 8) (+ sy 5) 1 2)))
+            (recur (inc tx))))
+        (recur (inc ty))))))
 
 (defn- draw-depth [^js ctx ^js surface vw vh cam-y]
   (let [top (- (* T (+ 14 (aget surface (quot W 2)))) cam-y)
@@ -1341,18 +1413,25 @@
      :vx 0 :vy 0 :facing 1 :walked 0 :ground? false :swing 0 :hp max-hp}))
 
 (def buy-prices
-  {:potion 10 :rope 5 :house 30})
+  {:potion 10 :rope 5 :torch 5 :house 30 :paint-red 10 :paint-yellow 10 :paint-blue 10})
 
 (def buy-amounts
-  {:potion 1 :rope 5 :house 1})
+  {:potion 1 :rope 5 :torch 1 :house 1 :paint-red 1 :paint-yellow 1 :paint-blue 1})
 
 (def house-item {:id :house :name "Fluffy House"})
+
+;; hues are degrees on the painter's red-yellow-blue wheel, where blue and yellow mix to green
+(def paints
+  {:paint-red {:id :paint-red :name "Red Paint" :hue 0}
+   :paint-yellow {:id :paint-yellow :name "Yellow Paint" :hue 120}
+   :paint-blue {:id :paint-blue :name "Blue Paint" :hue 240}})
 
 (defn- item-def
   "Returns the id and name of the item `id` that the shop sells."
   [id]
   (select-keys (or (first (filter #(= id (:id %)) loot))
-                   (when (= id :house) house-item))
+                   (when (= id :house) house-item)
+                   (paints id))
                [:id :name]))
 
 (defn- buy
@@ -1687,6 +1766,63 @@
     (let [{:keys [tiles surface]} (get-in st [:worlds :overworld])]
       (assoc st :fluffies (place-fluffies tiles surface)))))
 
+(defn- fluffy-hue
+  "Returns the red-yellow-blue wheel hue of Fluffy `f`, which starts blue, or red for
+  the lost friend of a quest."
+  [f]
+  (or (:hue f) (if (:red? f) 0 240)))
+
+(defn- mix-hue
+  "Returns the hue halfway between `a` and `b` along the shorter way round the wheel."
+  [a b]
+  (let [d (- (mod (+ (- b a) 540) 360) 180)]
+    (mod (+ a (/ d 2)) 360)))
+
+(def ^:private wheel
+  [[0 0] [60 30] [120 60] [180 120] [240 240] [300 280] [360 360]])
+
+(defn- screen-hue
+  "Converts a red-yellow-blue wheel hue to the hue of an HSL colour."
+  [h]
+  (some (fn [[[a ra] [b rb]]]
+          (when (<= a h b) (+ ra (* (- rb ra) (/ (- h a) (- b a))))))
+        (partition 2 1 wheel)))
+
+(defn- fluffy-colors
+  "Returns the wing, body and shine colours of Fluffy `f`."
+  [f]
+  (cond
+    (:hue f) (let [h (js/Math.round (screen-hue (:hue f)))]
+               [(str "hsl(" h ",100%,90%)") (str "hsl(" h ",72%,52%)") (str "hsl(" h ",100%,72%)")])
+    (:red? f) ["#ffd6d2" "#e0453d" "#ff8a80"]
+    :else ["#cfe6ff" "#3d7be8" "#6fa3ff"]))
+
+(defn- paint-fluffy
+  "Paints the Fluffy under the mouse within `fluffy-reach` of the player with the paint
+  of `hue`, mixing it halfway with the Fluffy's colour. Returns nil when the mouse
+  points at no Fluffy in reach."
+  [{:keys [player realm fluffies] :as st} hue]
+  (let [px (+ (:x player) (/ player-w 2))
+        py (+ (:y player) (/ player-h 2))
+        [ax ay] (:aim-at player)
+        hit (when ax
+              (->> (map-indexed vector fluffies)
+                   (filter (fn [[_ f]]
+                             (and (= realm (:realm f))
+                                  (<= (js/Math.hypot (- (:x f) ax) (- (:y f) ay)) (+ fluffy-r 8))
+                                  (<= (js/Math.hypot (- (:x f) px) (- (:y f) py)) fluffy-reach))))
+                   (sort-by (fn [[_ f]] (js/Math.hypot (- (:x f) ax) (- (:y f) ay))))
+                   first))]
+    (when-let [[i f] hit]
+      (let [painted (assoc f :hue (mix-hue (fluffy-hue f) hue))]
+        (-> st
+            (assoc-in [:fluffies i] painted)
+            (update :particles into
+                    (for [k (range 10)
+                          :let [a (* k 0.628)]]
+                      {:x (:x f) :y (:y f) :vx (* 2 (js/Math.cos a)) :vy (- (* 2 (js/Math.sin a)) 1)
+                       :life 30 :color (second (fluffy-colors painted))})))))))
+
 (defn- quest-friend?
   "Checks that Fluffy `i` is the lost friend of the quest in progress."
   [{:keys [quest]} i]
@@ -1975,12 +2111,10 @@
   "Draws the Fluffies of `realm` as fuzzy blue balls with flapping wings. A Fluffy
   inside its house is drawn a little smaller with its wings folded so it fits."
   [^js ctx fluffies realm clock cam-x cam-y]
-  (doseq [{:keys [x y phase out? red?] :as f} fluffies
+  (doseq [{:keys [x y phase out?] :as f} fluffies
           :when (= realm (:realm f))
           :let [home (and (:home f) (not out?))
-                [wing body shine] (if red?
-                                    ["#ffd6d2" "#e0453d" "#ff8a80"]
-                                    ["#cfe6ff" "#3d7be8" "#6fa3ff"])
+                [wing body shine] (fluffy-colors f)
                 flap (js/Math.sin (+ (/ clock 70) phase))
                 disc (fn [cx cy r]
                        (.beginPath ctx)
@@ -2029,8 +2163,12 @@
             :when (= realm (:realm f))
             :let [sx (- (:x f) cam-x) sy (- (:y f) cam-y)
                   g (.createRadialGradient ctx sx sy 2 sx sy 26)]]
-      (.addColorStop g 0 (if (:red? f) "rgba(255,140,130,0.55)" "rgba(140,190,255,0.45)"))
-      (.addColorStop g 1 (if (:red? f) "rgba(255,140,130,0)" "rgba(140,190,255,0)"))
+      (if-let [h (:hue f)]
+        (let [h (js/Math.round (screen-hue h))]
+          (.addColorStop g 0 (str "hsla(" h ",100%,75%,0.5)"))
+          (.addColorStop g 1 (str "hsla(" h ",100%,75%,0)")))
+        (do (.addColorStop g 0 (if (:red? f) "rgba(255,140,130,0.55)" "rgba(140,190,255,0.45)"))
+            (.addColorStop g 1 (if (:red? f) "rgba(255,140,130,0)" "rgba(140,190,255,0)"))))
       (set! (.-fillStyle ctx) g)
       (.fillRect ctx (- sx 26) (- sy 26) 52 52)
       (when (and (not (:following? f)) (not (:home f))
@@ -2080,7 +2218,8 @@
 (defn- use-slot
   "Uses the item in bag slot `i`. A Healing Potion restores `potion-heal` hit points
   when health is not full, Rope hangs down from the tile under the mouse, a block
-  is placed on the tile under the mouse, and the Dimension Amulet opens a portal when
+  or a torch is placed on the tile under the mouse, paint colours the Fluffy under the
+  mouse, and the Dimension Amulet opens a portal when
   the player is on the surface."
   [{:keys [player bag enemies] :as st} tiles i]
   (let [{:keys [id name count]} (get bag i)
@@ -2102,6 +2241,16 @@
         (if (pos? n)
           (spend st n)
           (popup st "Point at an open spot within reach")))
+
+      (paints id)
+      (if-let [painted (paint-fluffy st (:hue (paints id)))]
+        (spend painted 1)
+        (popup st "Point at a Fluffy near you"))
+
+      (= :torch id)
+      (if (place-block! tiles player enemies torch)
+        (spend st 1)
+        (popup st "Point at an open spot within reach"))
 
       (blocks id)
       (if (place-block! tiles player enemies (:tile (blocks id)))
@@ -2155,6 +2304,7 @@
      ($ :li "Rope hangs down from where the mouse points, one rope per block; jump into it to grab it")
      ($ :li "Hit a rope with the pickaxe to take all of it back")
      ($ :li "Digging gives Dirt and Stone blocks (up to 100 each); use them from the bag to build")
+     ($ :li "Torches are placed from the bag like blocks and light up their surroundings; near a torch health comes back twice as fast. Hit a torch with the pickaxe to take it back")
      ($ :li "On a rope, Space or W climbs, S climbs down, A or D jumps off")
      ($ :li "Slimes come out in the caves at night; one in twenty drops a Dimension Amulet")
      ($ :li "Use the amulet on the surface to open a portal, then hit the portal with the pickaxe to enter the Slime Dimension, where darker slimes take twice the hits and hit twice as hard")
@@ -2162,7 +2312,8 @@
      ($ :li "Slimes in the Slime Dimension sometimes drop an Arena Key; far to the east a locked gate leads to the Lord of Goo's arena")
      ($ :li "Rare blue Fluffies hide in caves around the world; press E next to one to make it follow you, and E again to let it wait")
      ($ :li "Buy a Fluffy House at the shop and place it on the ground from the bag; a Fluffy following you moves into an empty house and pays you " house-reward " coins")
-     ($ :li "Find the shop on the surface to sell your finds and buy potions and rope")))
+     ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")
+     ($ :li "Find the shop on the surface to sell your finds and buy potions, rope and torches")))
 
 (defn- ->b64 [^js arr]
   (let [b (js/Uint8Array. (.-buffer arr) (.-byteOffset arr) (.-byteLength arr))
@@ -2474,7 +2625,7 @@
 
 (def map-colors
   {grass [86 170 60] dirt [140 92 52] stone [118 118 128] trunk [110 72 40]
-   leaves [52 140 60] rope [200 170 110]})
+   leaves [52 140 60] rope [200 170 110] torch [255 170 60]})
 
 (defui mini-map
   "Draws the overworld one pixel per tile, refreshed twice a second, with every
@@ -2509,7 +2660,7 @@
                           (.putImageData ctx img 0 0)
                           (doseq [f (sort-by :red? (:fluffies st)) :when (= :overworld (:realm f))]
                             (dot (:x f) (:y f) (if (:red? f) 4.5 3.5) "#ffffff")
-                            (dot (:x f) (:y f) (if (:red? f) 3.5 2.5) (if (:red? f) "#e0453d" "#3d7be8")))
+                            (dot (:x f) (:y f) (if (:red? f) 3.5 2.5) (second (fluffy-colors f))))
                           (when (= :overworld (:realm st))
                             (let [{:keys [x y]} (:player st)]
                               (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 3 "#111111")
@@ -2742,7 +2893,8 @@
                                                       (let [p (spawn home)]
                                                         {:text "You fainted!" :x (+ (:x p) (/ player-w 2))
                                                          :y (- (:y p) 10) :life 150})))
-                                          (update-in st [:player :hp] #(min max-hp (+ (or % max-hp) (* regen dt)))))))
+                                          (let [rate (if (near-torch? (:tiles world) (:player st)) (* 2 regen) regen)]
+                                            (update-in st [:player :hp] #(min max-hp (+ (or % max-hp) (* rate dt))))))))
                              _ (set-coins! (:coins @state 0))
                              _ (set-bag! (:bag @state))
                              _ (set-map! (boolean (:map? @state)))
@@ -2778,6 +2930,7 @@
                                      (- (+ (:x player) (/ player-w 2)) cam-x)
                                      (- (+ (:y player) (/ player-h 2)) cam-y)
                                      light)
+                         (draw-flames ctx (:tiles world) vw vh cam-x cam-y t light)
                          (if (home?)
                            (draw-sky ctx vw vh cam-x t tod)
                            (do (set! (.-globalCompositeOperation ctx) "destination-over")
