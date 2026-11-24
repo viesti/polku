@@ -8,3 +8,4 @@ resources/public/css/
 dist/
 .dev.log
 .clj-kondo/
+.playwright-mcp/
