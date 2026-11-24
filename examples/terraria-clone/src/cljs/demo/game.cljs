@@ -2005,8 +2005,9 @@
                 :hp (max 0 (- (:hp player max-hp) 1)))))))
 
 (defn- strike-alien
-  "Hits the alien the pickaxe points at. Returns nil when no alien is aimed at, `:loot`
-  when it dies and pays `alien-reward` coins, and `:hit` otherwise."
+  "Hits the nearest alien in front of the pickaxe and within reach. Returns nil when the
+  pickaxe reaches none, `:loot` when the alien dies and pays `alien-reward` coins, and
+  `:hit` otherwise."
   [state]
   (let [{:keys [player aliens realm]} @state
         px (+ (:x player) (/ player-w 2))
@@ -2014,8 +2015,22 @@
         near (fn [a] (assoc a
                             :x (+ px (wrap-delta (- (:x a) px) (* T space-w)))
                             :y (+ py (wrap-delta (- (:y a) py) (* T space-h)))))
+        [hx hy] (hand player)
+        [ax ay] (or (:aim-at player) [(+ hx (:facing player)) hy])
+        ad (max 0.001 (js/Math.hypot (- ax hx) (- ay hy)))
+        ;; the same reach and swing direction as `strike-enemies` uses for slimes
+        dist (fn [a]
+               (let [{:keys [x y]} (near a)
+                     cx (- (+ x (/ alien-w 2)) hx)
+                     cy (- (+ y (/ alien-h 2)) hy)
+                     d (js/Math.hypot cx cy)]
+                 (when (and (<= d (+ reach 10))
+                            (or (< d 24)
+                                (> (/ (+ (* cx (- ax hx)) (* cy (- ay hy))) (* d ad)) 0.55)))
+                   d)))
         i (when (= realm :space)
-            (first (keep-indexed (fn [i a] (when (box-aimed? player (near a) alien-w alien-h) i)) aliens)))]
+            (some->> (keep-indexed (fn [i a] (when-let [d (dist a)] [d i])) aliens)
+                     seq (apply min-key first) second))]
     (when i
       (let [{:keys [hp] :as a} (get aliens i)
             {:keys [x y]} (near a)
