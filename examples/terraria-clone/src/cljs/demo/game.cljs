@@ -526,7 +526,7 @@
         n))))
 
 (declare strike-enemies stash portal-aimed? teleport gate-aimed? knock-gate strike-boss
-         strike-drone strike-alien here-ship box-aimed? fly-ship)
+         strike-drone strike-alien here-ship box-aimed? fly-ship aimed-mirror take-mirror)
 
 (defn- swing!
   "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
@@ -543,6 +543,11 @@
       (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight"))
            (when-let [ship (here-ship @state)] (box-aimed? player ship ship-w ship-h)))
       (do (swap! state fly-ship) true)
+
+      (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight"))
+           (aimed-mirror @state))
+      (do (swap! state #(-> % (take-mirror (aimed-mirror %)) (assoc-in [:player :swing] swing-frames)))
+          true)
 
       (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight"))
            (= :slime (:realm @state)) (not (:gate-open? @state))
@@ -1422,7 +1427,7 @@
     (-> st
         (assoc-in [:away realm] here)
         (merge there)
-        (assoc :realm to :particles [] :popups [] :spawn-in 0))))
+        (assoc :realm to :particles [] :popups [] :rockets [] :spawn-in 0))))
 
 (declare leave-arena)
 
@@ -1537,6 +1542,16 @@
 
 (def house-item {:id :house :name "Fluffy House"})
 
+;; things the shop sells for stars once the player has collected one
+(def star-items
+  {:mirror {:id :mirror :name "Magic Mirror"}
+   :rocket {:id :rocket :name "Firework Rocket"}
+   :tamer {:id :tamer :name "Alien Tamer"}})
+
+(def star-prices {:mirror 15 :rocket 5 :tamer 5})
+
+(def space-map-price 30)
+
 ;; hues are degrees on the painter's red-yellow-blue wheel, where blue and yellow mix to green
 (def paints
   {:paint-red {:id :paint-red :name "Red Paint" :hue 0}
@@ -1548,7 +1563,8 @@
   [id]
   (select-keys (or (first (filter #(= id (:id %)) loot))
                    (when (= id :house) house-item)
-                   (paints id))
+                   (paints id)
+                   (star-items id))
                [:id :name]))
 
 (defn- buy
@@ -1570,6 +1586,43 @@
   [st]
   (if (and (not (:map? st)) (>= (:coins st 0) map-price))
     (-> st (add-coins (- map-price)) (assoc :map? true))
+    st))
+
+(defn star-count-in
+  "Returns how many stars the bag holds."
+  [bag]
+  (reduce + 0 (keep #(when (= :star (:id %)) (:count %)) bag)))
+
+(defn- pay-stars
+  "Takes `n` stars out of the bag, from as many slots as it takes."
+  [st n]
+  (loop [st st n n]
+    (let [i (first (keep-indexed (fn [i s] (when (= :star (:id s)) i)) (:bag st)))]
+      (if (or (<= n 0) (nil? i))
+        st
+        (let [have (get-in st [:bag i :count])]
+          (recur (if (<= have n)
+                   (assoc-in st [:bag i] nil)
+                   (update-in st [:bag i :count] - n))
+                 (- n have)))))))
+
+(defn- buy-for-stars
+  "Buys one star item `id` into the bag. Leaves the state unchanged when the player has
+  too few stars or the bag has no slot for it."
+  [st id]
+  (let [cost (star-prices id)]
+    (if (and cost (>= (star-count-in (:bag st)) cost))
+      (let [paid (pay-stars st cost)]
+        (if (bag-slot (:bag paid) id)
+          (stash paid [(assoc (item-def id) :count 1)])
+          st))
+      st)))
+
+(defn- buy-space-map
+  "Buys the map of outer space for `space-map-price` stars, once."
+  [st]
+  (if (and (not (:space-map? st)) (>= (star-count-in (:bag st)) space-map-price))
+    (-> st (pay-stars space-map-price) (assoc :space-map? true))
     st))
 
 (defn add-arena
@@ -2056,6 +2109,7 @@
       (cond-> (assoc st :aliens aliens :stars stars :star-in star-in)
         (pos? got)
         (-> (stash [(assoc star-item :count got)])
+            (assoc :star-shop? true)
             (update :popups conj {:text (str "+" got " Star") :icon :star :x px :y (- (:y player) 10) :life 90}))
         touching
         (update :player assoc
@@ -2111,12 +2165,10 @@
                                                       :x (+ x (/ alien-w 2)) :y (- y 8) :life 90})))
               :loot))))))
 
-(defn- draw-aliens [^js ctx aliens t cam-x cam-y]
-  (doseq [{:keys [x y flash phase]} aliens
-          :let [bob (* 2 (js/Math.sin (+ (/ t 300) phase)))
-                sx (js/Math.round (- x cam-x))
-                sy (js/Math.round (+ (- y cam-y) bob))
-                cx (+ sx (/ alien-w 2))]]
+(defn- draw-alien
+  "Draws one alien with its top-left corner at screen position `sx`, `sy`."
+  [^js ctx sx sy flash phase t]
+  (let [cx (+ sx (/ alien-w 2))]
     (set! (.-strokeStyle ctx) "#7a3fc4")
     (set! (.-lineWidth ctx) 2)
     (doseq [side [-1 1]]
@@ -2135,6 +2187,40 @@
       (.fillRect ctx (+ sx 3 (* k 5)) (+ sy alien-h -3) 3 (+ 3 (js/Math.round (* 2 (js/Math.sin (+ (/ t 120) k phase)))))))
     (disc ctx "#ffffff" cx (+ sy 9) 5)
     (disc ctx "#1a0a33" (+ cx 1) (+ sy 9) 2.5)))
+
+(defn- draw-aliens [^js ctx aliens t cam-x cam-y]
+  (doseq [{:keys [x y flash phase]} aliens
+          :let [bob (* 2 (js/Math.sin (+ (/ t 300) phase)))]]
+    (draw-alien ctx (js/Math.round (- x cam-x)) (js/Math.round (+ (- y cam-y) bob)) flash phase t)))
+
+(def tame-reach (* 8 T))
+
+(defn- tame-alien
+  "Turns the nearest alien within `tame-reach` of the player into a friendly Fluffy that
+  keeps the alien's looks and follows the player. Returns nil when no alien is near."
+  [{:keys [player realm aliens] :as st}]
+  (let [px (+ (:x player) (/ player-w 2))
+        py (+ (:y player) (/ player-h 2))
+        dist (fn [{:keys [x y]}]
+               (js/Math.hypot (wrap-delta (- (+ x (/ alien-w 2)) px) (* T space-w))
+                              (wrap-delta (- (+ y (/ alien-h 2)) py) (* T space-h))))
+        near (when (= :space realm)
+               (->> (map-indexed vector aliens)
+                    (filter (fn [[_ a]] (<= (dist a) tame-reach)))
+                    (sort-by (fn [[_ a]] (dist a)))
+                    first))]
+    (when-let [[i {:keys [x y phase]}] near]
+      (let [cx (+ x (/ alien-w 2))
+            cy (+ y (/ alien-h 2))]
+        (-> st
+            (update :aliens (fn [as] (into (subvec as 0 i) (subvec as (inc i)))))
+            (update :fluffies (fnil conj []) {:realm :space :alien? true :phase phase
+                                              :x cx :y cy :hx cx :hy cy :following? true})
+            (update :particles into (for [k (range 14)
+                                          :let [a (* k 0.45)]]
+                                      {:x cx :y cy :vx (* 2.5 (js/Math.cos a)) :vy (- (* 2.5 (js/Math.sin a)) 1)
+                                       :life 35 :color (if (even? k) "#7cff9a" "#ffffff")}))
+            (update :popups conj {:text "The alien is tame and follows you!" :x cx :y (- y 10) :life 150}))))))
 
 (defn- draw-stars [^js ctx stars t cam-x cam-y]
   (doseq [{:keys [x y phase]} stars
@@ -2397,6 +2483,7 @@
               (->> (map-indexed vector fluffies)
                    (filter (fn [[_ f]]
                              (and (= realm (:realm f))
+                                  (not (:alien? f))
                                   (<= (js/Math.hypot (- (:x f) ax) (- (:y f) ay)) (+ fluffy-r 8))
                                   (<= (js/Math.hypot (- (:x f) px) (- (:y f) py)) fluffy-reach))))
                    (sort-by (fn [[_ f]] (js/Math.hypot (- (:x f) ax) (- (:y f) ay))))
@@ -2432,7 +2519,10 @@
         (-> st
             (cond-> (and follow? (quest-friend? st i)) (assoc-in [:quest :found?] true))
             (update-in [:fluffies i] assoc :following? follow? :hx (:x f) :hy (:y f))
-            (update :popups conj {:text (if follow? "A Fluffy is following you!" "The Fluffy waits here")
+            (update :popups conj {:text (cond
+                                          (:alien? f) (if follow? "The tame alien follows you!" "The tame alien waits here")
+                                          follow? "A Fluffy is following you!"
+                                          :else "The Fluffy waits here")
                                   :x (:x f) :y (- (:y f) 18) :life 120})))
       st)))
 
@@ -2679,6 +2769,142 @@
     (.arc ctx (- hx cam-x) (- hy cam-y) hole-r 0 (* 2 js/Math.PI))
     (.fill ctx)))
 
+(def mirror-w 32)
+(def mirror-h 48)
+;; how far from a mirror the player still shows in it
+(def mirror-sight (* 6 T))
+
+(defn- place-mirror
+  "Stands a Magic Mirror two tiles wide on open ground at the tile under the mouse,
+  within `reach` of the hand. Returns the new state, or nil when there is no room there."
+  [{:keys [player realm mirrors] :as st} tiles]
+  (let [[hx hy] (hand player)
+        [ax ay] (or (:aim-at player) [hx hy])
+        tx (js/Math.floor (/ ax T))
+        ;; a mirror aimed into the ground rises onto it, and one aimed in the air drops onto it
+        ty (loop [ty (js/Math.floor (/ ay T)) n 0]
+             (if (and (< n 3) (solid? (tile-at tiles tx ty)))
+               (recur (dec ty) (inc n))
+               ty))
+        cols [tx (inc tx)]
+        ground (fn [c] (first (filter #(solid? (tile-at tiles c %)) (range ty (+ ty 6)))))
+        grounds (map ground cols)
+        ty (when (every? some? grounds) (dec (apply min grounds)))
+        x (* T tx)
+        bottom (* T (inc (or ty 0)))
+        room? (and ty
+                   (every? #(<= % (+ ty 2)) grounds)
+                   (every? (fn [[c dy]] (= air (tile-at tiles c (- ty dy))))
+                           (for [c cols dy (range 3)] [c dy]))
+                   (<= (js/Math.hypot (- (+ x (/ mirror-w 2)) hx) (- (- bottom (/ mirror-h 2)) hy)) (+ reach 24))
+                   (not-any? (fn [m] (and (= realm (:realm m))
+                                          (< (js/Math.abs (- (:x m) x)) mirror-w)
+                                          (< (js/Math.abs (- (:y m) (- bottom mirror-h))) mirror-h)))
+                             mirrors))]
+    (when room?
+      (update st :mirrors (fnil conj []) {:realm realm :x x :y (- bottom mirror-h)}))))
+
+(defn- aimed-mirror
+  "Returns the index of the mirror in the player's realm that the pickaxe points at
+  within reach, or nil."
+  [{:keys [player realm mirrors]}]
+  (first (keep-indexed (fn [i m] (when (and (= realm (:realm m)) (box-aimed? player m mirror-w mirror-h)) i))
+                       mirrors)))
+
+(defn- take-mirror
+  "Takes mirror `i` back into the bag, unless the bag has no room for it."
+  [{:keys [player] :as st} i]
+  (if (bag-slot (:bag st) :mirror)
+    (-> st
+        (update :mirrors (fn [ms] (into (subvec ms 0 i) (subvec ms (inc i)))))
+        (stash [(assoc (item-def :mirror) :count 1)]))
+    (update st :popups conj {:text "The bag is full" :x (+ (:x player) (/ player-w 2))
+                             :y (- (:y player) 10) :life 90})))
+
+(defn- draw-mirrors
+  "Draws the Magic Mirrors of `realm` as gold-framed standing mirrors. A player within
+  `mirror-sight` shows in the glass, turned the other way and fading with distance."
+  [^js ctx mirrors realm player suit? cam-x cam-y]
+  (doseq [{:keys [x y] :as m} mirrors
+          :when (= realm (:realm m))
+          :let [sx (js/Math.round (- x cam-x))
+                sy (js/Math.round (- y cam-y))
+                gx (+ sx 7) gy (+ sy 5) gw 18 gh 35
+                dx (- (+ (:x player) (/ player-w 2)) (+ x (/ mirror-w 2)))
+                dy (- (+ (:y player) player-h) (+ y mirror-h))
+                near? (and (< (js/Math.abs dx) mirror-sight) (< (js/Math.abs dy) (* 2 T)))
+                rect (fn [color rx ry rw rh]
+                       (set! (.-fillStyle ctx) color)
+                       (.fillRect ctx (+ sx rx) (+ sy ry) rw rh))
+                g (.createLinearGradient ctx gx gy (+ gx gw) (+ gy gh))]]
+    (rect "#8a6a10" 6 44 6 4)
+    (rect "#8a6a10" 20 44 6 4)
+    (rect "#c9a227" 6 0 20 2)
+    (rect "#c9a227" 4 2 24 42)
+    (rect "#8a6a10" 4 42 24 2)
+    (.addColorStop g 0 "#cfeaff")
+    (.addColorStop g 0.5 "#eef8ff")
+    (.addColorStop g 1 "#9fcff0")
+    (set! (.-fillStyle ctx) g)
+    (.fillRect ctx gx gy gw gh)
+    (when near?
+      (.save ctx)
+      (.beginPath ctx)
+      (.rect ctx gx gy gw gh)
+      (.clip ctx)
+      (set! (.-globalAlpha ctx) (- 0.9 (* 0.5 (/ (js/Math.abs dx) mirror-sight))))
+      ;; the reflection shifts a little towards the player's side but stays in the glass
+      (.translate ctx (+ gx (/ gw 2) (max -5 (min 5 (* 0.08 dx)))) (+ gy gh))
+      (.scale ctx 0.8 0.8)
+      (draw-player ctx (assoc player :x (- (/ player-w 2)) :y (- player-h) :facing (- (:facing player 1)))
+                   0 0 suit?)
+      (.restore ctx))
+    (set! (.-fillStyle ctx) "rgba(255,255,255,0.6)")
+    (.fillRect ctx (+ gx 3) (+ gy 4) 2 10)
+    (.fillRect ctx (+ gx 6) (+ gy 3) 1 5)))
+
+;; frames before a rocket bursts, about 200 pixels above the player
+(def rocket-fuse 34)
+
+(defn- launch-rocket
+  "Sends a firework rocket up from the player."
+  [{:keys [player] :as st}]
+  (update st :rockets (fnil conj [])
+          {:x (+ (:x player) (/ player-w 2)) :y (:y player) :vy -6 :fuse rocket-fuse :hue (rand-int 360)}))
+
+(defn- step-rockets
+  "Flies each rocket up with a trail of sparks and bursts it into a ring of coloured
+  sparks when its fuse runs out."
+  [st dt]
+  (if (empty? (:rockets st))
+    st
+    (let [moved (mapv #(-> % (update :y + (* (:vy %) dt)) (update :fuse - dt)) (:rockets st))
+          trail (for [{:keys [x y]} moved]
+                  {:x (+ x (- (js/Math.random) 0.5)) :y (+ y 8) :vx (- (* 0.6 (js/Math.random)) 0.3) :vy 1
+                   :life 12 :color "#ffb347"})
+          burst (for [{:keys [x y hue fuse]} moved
+                      :when (<= fuse 0)
+                      k (range 48)
+                      :let [a (* 2 js/Math.PI (/ k 48))
+                            s (+ 2 (* 3 (js/Math.random)))
+                            h (mod (+ hue (* 120 (mod k 3))) 360)]]
+                  {:x x :y y :vx (* s (js/Math.cos a)) :vy (- (* s (js/Math.sin a)) 1)
+                   :life (+ 40 (rand-int 30)) :color (str "hsl(" h ",100%,65%)")})]
+      (-> st
+          (assoc :rockets (filterv #(pos? (:fuse %)) moved))
+          (update :particles into (concat trail burst))))))
+
+(defn- draw-rockets [^js ctx rockets cam-x cam-y]
+  (doseq [{:keys [x y]} rockets
+          :let [sx (js/Math.round (- x cam-x))
+                sy (js/Math.round (- y cam-y))]]
+    (set! (.-fillStyle ctx) "#e53935")
+    (.fillRect ctx (- sx 2) (- sy 5) 5 10)
+    (set! (.-fillStyle ctx) "#ffffff")
+    (.fillRect ctx (- sx 2) (- sy 1) 5 2)
+    (set! (.-fillStyle ctx) "#ffd54a")
+    (.fillRect ctx (- sx 1) (+ sy 5) 3 3)))
+
 (defn- draw-house-rims
   "Draws the wooden rim and perch of each house opening over its resident."
   [^js ctx houses realm cam-x cam-y]
@@ -2699,8 +2925,14 @@
   "Draws the Fluffies of `realm` as fuzzy blue balls with flapping wings. A Fluffy
   inside its house is drawn a little smaller with its wings folded so it fits."
   [^js ctx fluffies realm clock cam-x cam-y]
+  ;; a tamed alien behaves as a Fluffy but keeps its alien looks
+  (doseq [{:keys [x y phase] :as f} fluffies
+          :when (and (= realm (:realm f)) (:alien? f))
+          :let [bob (* 2 (js/Math.sin (+ (/ clock 300) phase)))]]
+    (draw-alien ctx (js/Math.round (- x cam-x (/ alien-w 2)))
+                (js/Math.round (+ (- y cam-y (/ alien-h 2)) bob)) 0 phase clock))
   (doseq [{:keys [x y phase out?] :as f} fluffies
-          :when (= realm (:realm f))
+          :when (and (= realm (:realm f)) (not (:alien? f)))
           :let [home (and (:home f) (not out?))
                 [wing body shine] (fluffy-colors f)
                 flap (js/Math.sin (+ (/ clock 70) phase))
@@ -2850,6 +3082,19 @@
         (spend placed 1)
         (popup st "Point at open ground within reach, two blocks wide"))
 
+      (= :mirror id)
+      (if-let [placed (place-mirror st tiles)]
+        (spend placed 1)
+        (popup st "Point at open ground within reach, two blocks wide"))
+
+      (= :rocket id)
+      (spend (launch-rocket st) 1)
+
+      (= :tamer id)
+      (if-let [tamed (tame-alien st)]
+        (spend tamed 1)
+        (popup st (if (= :space (:realm st)) "No alien close enough" "Aliens live in outer space")))
+
       (and (= :amulet id) (not= :overworld (:realm st)))
       (popup st "The amulet is silent here; find the portal home")
 
@@ -2904,6 +3149,7 @@
      ($ :li "Once the Lord of Goo is beaten, drones fly over the overworld and now and then land; break a landed drone with the pickaxe and a spaceship comes down somewhere nearby")
      ($ :li "Hit the spaceship with the pickaxe to fly to outer space, where gravity is weak and you can hop between asteroids; space wraps round, so flying on past one edge brings you in over the opposite one. Hit the ship again to fly home")
      ($ :li "Purple aliens float after you in space and hurt on touch; three pickaxe hits pop one for " alien-reward " coins. Touch the gold stars to collect them and sell them at the shop")
+     ($ :li "Once you have a star, the shop also sells things for stars: a Magic Mirror to stand on the ground (hit it with the pickaxe to take it back), Firework Rockets, a Map of Space, and an Alien Tamer that turns the nearest alien into a tame friend who follows you like a Fluffy")
      ($ :li "Find the shop on the surface and press E there to sell your finds and buy potions, rope and torches")))
 
 (defn- ->b64 [^js arr]
@@ -2934,7 +3180,7 @@
   the time of day) as an EDN string."
   [st]
   (pr-str (-> st
-              (dissoc :keys :mouse :mouse-down? :particles :popups :clock-offset :paused?)
+              (dissoc :keys :mouse :mouse-down? :particles :popups :rockets :clock-offset :paused?)
               (update :worlds #(update-vals % pack-world)))))
 
 (defn- merge-inventory
@@ -3267,6 +3513,58 @@
     ($ :canvas {:ref canvas-ref :width W :height H
                 :class "block w-[480px] max-w-[45vw] rounded-md border-2 border-amber-800 [image-rendering:pixelated]"})))
 
+(defui space-map
+  "Draws outer space one pixel per tile, refreshed twice a second, with the stars as
+  gold dots, wild aliens as purple dots, tame ones as green dots, the spaceship as a
+  silver dot and the player as a white dot."
+  [{:keys [state-ref]}]
+  (let [canvas-ref (use-ref nil)]
+    (use-effect
+     (fn []
+       (let [draw (fn []
+                    (when-let [^js canvas @canvas-ref]
+                      (when-let [state @state-ref]
+                        (let [st @state
+                              tiles (get-in st [:worlds :space :tiles])
+                              ctx (.getContext canvas "2d")
+                              img (.createImageData ctx space-w space-h)
+                              ^js px (.-data img)
+                              dot (fn [x y r color]
+                                    (set! (.-fillStyle ctx) color)
+                                    (.beginPath ctx)
+                                    (.arc ctx (- (/ x T) space-x0) (- (/ y T) space-y0) r 0 (* 2 js/Math.PI))
+                                    (.fill ctx))]
+                          (when tiles
+                            (dotimes [y space-h]
+                              (dotimes [x space-w]
+                                (let [[r g b] (if (= asteroid (aget tiles (idx (+ space-x0 x) (+ space-y0 y))))
+                                                [128 118 136] [10 10 26])
+                                      i (* 4 (+ x (* y space-w)))]
+                                  (aset px i r)
+                                  (aset px (+ i 1) g)
+                                  (aset px (+ i 2) b)
+                                  (aset px (+ i 3) 255))))
+                            (.putImageData ctx img 0 0)
+                            (doseq [{:keys [x y]} (:stars st)]
+                              (dot x y 1.5 "#ffd54a"))
+                            (doseq [{:keys [x y]} (:aliens st)]
+                              (dot (+ x (/ alien-w 2)) (+ y (/ alien-h 2)) 2.5 "#b06cff"))
+                            (doseq [f (:fluffies st) :when (= :space (:realm f))]
+                              (dot (:x f) (:y f) 2.5 (if (:alien? f) "#7cff9a" (second (fluffy-colors f)))))
+                            (when-let [{:keys [x y]} (get-in st [:worlds :space :ship])]
+                              (dot (+ x (/ ship-w 2)) (+ y (/ ship-h 2)) 4 "#111111")
+                              (dot (+ x (/ ship-w 2)) (+ y (/ ship-h 2)) 3 "#d9dee6"))
+                            (when (= :space (:realm st))
+                              (let [{:keys [x y]} (:player st)]
+                                (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 3 "#111111")
+                                (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 2 "#ffffff"))))))))
+             id (js/setInterval draw 500)]
+         (draw)
+         #(js/clearInterval id)))
+     [state-ref])
+    ($ :canvas {:ref canvas-ref :width space-w :height space-h
+                :class "block w-[480px] max-w-[45vw] rounded-md border-2 border-indigo-400 [image-rendering:pixelated]"})))
+
 (defui coin-panel [{:keys [coins on-menu map? map-shown? on-map]}]
   (let [[muted? set-muted!] (use-state (music/muted?))]
     ($ :div {:class "absolute top-4 right-4 flex items-stretch gap-2 select-none"}
@@ -3294,10 +3592,50 @@
   ($ :span {:class "inline-flex items-center gap-1 font-mono text-amber-300"}
      amount ($ icons/icon {:id :coin :size 14})))
 
-(defui shop-panel [{:keys [coins bag on-sell on-buy map? on-buy-map]}]
+(defui star-price [{:keys [amount]}]
+  ($ :span {:class "inline-flex items-center gap-1 font-mono text-yellow-200"}
+     amount ($ icons/icon {:id :star :size 14})))
+
+(defn- buy-button [ok? on-click]
+  ($ :button {:class (if ok?
+                       "rounded bg-emerald-600 px-2 py-0.5 font-semibold hover:bg-emerald-500"
+                       "cursor-not-allowed rounded bg-white/10 px-2 py-0.5 font-semibold text-white/40")
+              :disabled (not ok?)
+              :on-click #(do (.blur (.-currentTarget %)) (on-click))}
+     "Buy"))
+
+(defui star-shop
+  "Lists what the shop sells for stars, paid from the stars in the bag."
+  [{:keys [bag on-buy-star space-map? on-buy-space-map]}]
+  (let [stars (star-count-in bag)]
+    ($ :<>
+       ($ :div {:class "mb-2 flex items-center gap-1.5 font-semibold text-yellow-200"}
+          ($ icons/icon {:id :star :size 16}) "Star Shop")
+       ($ :ul {:class "mb-1 space-y-1"}
+          (for [[id cost] star-prices
+                :let [{:keys [name]} (item-def id)
+                      ok? (and (>= stars cost) (bag-slot bag id))]]
+            ($ :li {:key (str id) :class "flex items-center gap-2 rounded bg-indigo-400/20 px-2 py-1"}
+               ($ icons/icon {:id id :size 20})
+               ($ :span {:class "flex-1"} name (when (= id :tamer) " (one use)"))
+               ($ star-price {:amount cost})
+               (buy-button ok? #(on-buy-star id))))
+          ($ :li {:key "space-map" :class "flex items-center gap-2 rounded bg-indigo-400/20 px-2 py-1"}
+             ($ icons/icon {:id :map :size 20})
+             ($ :span {:class "flex-1"} "Map of Space")
+             (if space-map?
+               ($ :span {:class "px-2 py-0.5 font-semibold text-emerald-300"} "Owned")
+               ($ :<>
+                  ($ star-price {:amount space-map-price})
+                  (buy-button (>= stars space-map-price) on-buy-space-map)))))
+       ($ :div {:class "mb-3 flex items-center gap-1 text-xs text-amber-200/70"}
+          "You have " ($ star-price {:amount stars})))))
+
+(defui shop-panel [{:keys [coins bag on-sell on-buy map? on-buy-map star-shop? on-buy-star
+                           space-map? on-buy-space-map]}]
   (let [sellable (filter #(and % (prices (:id %))) bag)
         money coins]
-    ($ :div {:class "absolute bottom-6 left-1/2 w-80 -translate-x-1/2 rounded-lg border-2 border-amber-700 bg-amber-950/90 p-4 text-sm text-amber-50 shadow-xl select-none"}
+    ($ :div {:class "absolute bottom-6 left-1/2 max-h-[85vh] w-80 -translate-x-1/2 overflow-y-auto rounded-lg border-2 border-amber-700 bg-amber-950/90 p-4 text-sm text-amber-50 shadow-xl select-none"}
        ($ :div {:class "mb-1 flex items-center gap-1.5 text-base font-bold"} ($ icons/icon {:id :coin :size 18}) "Shop")
        ($ :div {:class "mb-2 font-semibold text-amber-200"} "Buy")
        ($ :ul {:class "mb-1 space-y-1"}
@@ -3331,6 +3669,9 @@
                        "Buy"))))))
        ($ :div {:class "mb-3 flex items-center gap-1 text-xs text-amber-200/70"}
           "You have " ($ price {:amount money}))
+       (when star-shop?
+         ($ star-shop {:bag bag :on-buy-star on-buy-star
+                       :space-map? space-map? :on-buy-space-map on-buy-space-map}))
        ($ :div {:class "mb-2 font-semibold text-amber-200"} "Sell")
        (if (empty? sellable)
          ($ :div {:class "text-amber-200/70"} "You have nothing to sell yet.")
@@ -3360,9 +3701,19 @@
         [map? set-map!] (use-state false)
         [map-shown? set-map-shown!] (use-state true)
         [quest set-quest!] (use-state nil)
+        [star-shop? set-star-shop!] (use-state false)
+        [space-map? set-space-map!] (use-state false)
+        [in-space? set-in-space!] (use-state false)
         sync! (fn [st]
                 (set-coins! (:coins st 0))
                 (set-bag! (:bag st)))
+        on-buy-star (fn [id]
+                      (when-let [state @state-ref]
+                        (sync! (swap! state buy-for-stars id))))
+        on-buy-space-map (fn []
+                           (when-let [state @state-ref]
+                             (sync! (swap! state buy-space-map))
+                             (set-map-shown! true)))
         on-buy-map (fn []
                      (when-let [state @state-ref]
                        (sync! (swap! state buy-map))
@@ -3506,9 +3857,14 @@
                              _ (set-coins! (:coins @state 0))
                              _ (set-bag! (:bag @state))
                              _ (set-map! (boolean (:map? @state)))
+                             _ (set-space-map! (boolean (:space-map? @state)))
+                             _ (set-in-space! space?)
+                             _ (set-star-shop! (boolean (or (:star-shop? @state)
+                                                            (pos? (star-count-in (:bag @state))))))
                              _ (set-hp! (/ (js/Math.floor (* 10 (get-in @state [:player :hp]))) 10))
                              {:keys [player particles chests popups enemies portal]}
                              (swap! state #(-> %
+                                               (step-rockets dt)
                                                (update :particles step-particles dt)
                                                (update :popups step-popups dt)))]
                          (.setTransform ctx dpr 0 0 dpr 0 0)
@@ -3535,6 +3891,7 @@
                            (when space?
                              (draw-ship ctx (get-in @state [:worlds :space :ship]) t cam-x cam-y))
                            (draw-houses ctx (:houses @state) (:realm @state) cam-x cam-y)
+                           (draw-mirrors ctx (:mirrors @state) (:realm @state) player space? cam-x cam-y)
                            (draw-fluffies ctx (:fluffies @state) (:realm @state) clock cam-x cam-y)
                            (draw-house-rims ctx (:houses @state) (:realm @state) cam-x cam-y)
                            (when (even? (js/Math.floor (/ (:hurt player 0) 4)))
@@ -3542,6 +3899,7 @@
                              (draw-pickaxe ctx player cam-x cam-y))
                            (when-let [levels (:levels world)]
                              (draw-ooze ctx (:tiles world) levels vw vh cam-x cam-y t))
+                           (draw-rockets ctx (:rockets @state) cam-x cam-y)
                            (draw-particles ctx particles cam-x cam-y))
                          (when (home?) (draw-depth ctx (:surface world) vw vh cam-y))
                          (draw-night ctx vw vh
@@ -3589,15 +3947,23 @@
           ($ health-bar {:hp hp})
           ($ quest-panel {:quest quest}))
        ($ coin-panel {:coins coins :on-menu #(set-menu! not)
-                      :map? map? :map-shown? map-shown? :on-map #(set-map-shown! not)})
-       (when (and map? map-shown?)
-         ($ :div {:class "absolute top-20 right-4 select-none"}
-            ($ mini-map {:state-ref state-ref})))
+                      :map? (or map? space-map?) :map-shown? map-shown? :on-map #(set-map-shown! not)})
+       (when map-shown?
+         (cond
+           (and in-space? space-map?)
+           ($ :div {:class "absolute top-20 right-4 select-none"}
+              ($ space-map {:state-ref state-ref}))
+
+           map?
+           ($ :div {:class "absolute top-20 right-4 select-none"}
+              ($ mini-map {:state-ref state-ref}))))
        (when boss-hp
          ($ boss-bar {:hp boss-hp}))
        (when at-shop?
          ($ shop-panel {:coins coins :bag bag :on-sell on-sell :on-buy on-buy
-                        :map? map? :on-buy-map on-buy-map}))
+                        :map? map? :on-buy-map on-buy-map
+                        :star-shop? star-shop? :on-buy-star on-buy-star
+                        :space-map? space-map? :on-buy-space-map on-buy-space-map}))
        (when menu?
          ($ menu-panel {:on-close #(set-menu! false)
                         :snapshot #(save-data @@state-ref)

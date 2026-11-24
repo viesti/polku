@@ -177,6 +177,28 @@
                  ".oyyooyyo."
                  ".oyo..oyo."
                  ".oo....oo."]}
+   :rocket {:palette {\r "#e53935" \w "#ffffff" \y "#ffd54a" \o "#ff7a1a" \s "#8a5a2b"}
+            :rows ["....rr...."
+                   "...rrrr..."
+                   "...rwwr..."
+                   "...rrrr..."
+                   "...rwwr..."
+                   "...rrrr..."
+                   "..rrrrrr.."
+                   "....ss...."
+                   "...yooy..."
+                   "....yy...."]}
+   :tamer {:palette {\g "#8f99a3" \d "#4a5058" \s "#7cff9a" \p "#b06cff" \a "#ff4d6d"}
+           :rows ["........a."
+                  ".......d.."
+                  ".ggggggg.."
+                  ".gsssssg.."
+                  ".gspspsg.."
+                  ".gsspssg.."
+                  ".gsssssg.."
+                  ".ggggggg.."
+                  ".gdgdgdg.."
+                  ".ggggggg.."]}
    :key {:palette {\o "#6b4a00" \y "#ffcc33"}
          :rows [".........."
                 ".ooo......"
