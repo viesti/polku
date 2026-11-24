@@ -961,7 +961,43 @@
     (set! (.-fillStyle ctx) g)
     (.fillRect ctx 0 (max 0 top) vw vh)))
 
-(defn- draw-player [^js ctx {:keys [x y facing walked ground? vx]} cam-x cam-y]
+(defn- draw-spacesuit
+  "Draws the player in a white spacesuit with an oxygen tank on the back and a round
+  glass helmet that shows the face."
+  [^js ctx sx sy facing swing rect]
+  (rect "#8f99a3" -3 14 4 13)
+  (rect "#e67e22" -3 13 4 2)
+  (rect "#e8ecef" 3 28 5 10)
+  (rect "#e8ecef" 10 28 5 10)
+  (rect "#7d8791" (+ 3 swing) 34 5 4)
+  (rect "#7d8791" (- 10 swing) 34 5 4)
+  (rect "#e8ecef" 2 15 14 14)
+  (rect "#e67e22" 2 23 14 2)
+  (rect "#9aa3ad" 9 17 4 3)
+  (rect "#d5dbe0" (+ 7 (- swing)) 17 4 9)
+  (rect "#7d8791" (+ 7 (- swing)) 26 4 3)
+  (rect "#f1c27d" 4 4 11 10)
+  (rect "#6b3e1f" 4 3 11 3)
+  (rect "#1d1d1d" 12 8 2 3)
+  (rect "#9aa3ad" 2 14 15 2)
+  (let [cx (if (pos? facing) (+ sx 9.5) (- (+ sx player-w) 9.5))
+        cy (+ sy 8)]
+    (.beginPath ctx)
+    (.arc ctx cx cy 8.5 0 (* 2 js/Math.PI))
+    (set! (.-fillStyle ctx) "rgba(160,215,255,0.28)")
+    (.fill ctx)
+    (set! (.-strokeStyle ctx) "#dfe6ea")
+    (set! (.-lineWidth ctx) 2)
+    (.stroke ctx)
+    (.beginPath ctx)
+    (.arc ctx cx cy 5.5 (* 1.1 js/Math.PI) (* 1.45 js/Math.PI))
+    (set! (.-strokeStyle ctx) "rgba(255,255,255,0.8)")
+    (set! (.-lineWidth ctx) 1.5)
+    (.stroke ctx)))
+
+(defn- draw-player
+  "Draws the player, in the spacesuit when `suit?` is true."
+  [^js ctx {:keys [x y facing walked ground? vx]} cam-x cam-y suit?]
   (let [sx (js/Math.round (- x cam-x))
         sy (js/Math.round (- y cam-y))
         moving? (and ground? (> (js/Math.abs vx) 0.4))
@@ -969,16 +1005,18 @@
         rect (fn [color rx ry rw rh]
                (set! (.-fillStyle ctx) color)
                (.fillRect ctx (if (pos? facing) (+ sx rx) (- (+ sx player-w) rx rw)) (+ sy ry) rw rh))]
-    (rect "#3b2f8f" 3 28 5 10)
-    (rect "#3b2f8f" 10 28 5 10)
-    (rect "#2a2266" (+ 3 swing) 34 5 4)
-    (rect "#2a2266" (- 10 swing) 34 5 4)
-    (rect "#c0392b" 2 15 14 14)
-    (rect "#f1c27d" (+ 7 (- swing)) 17 4 11)
-    (rect "#f1c27d" 3 3 13 13)
-    (rect "#6b3e1f" 2 0 15 5)
-    (rect "#6b3e1f" 2 0 4 10)
-    (rect "#1d1d1d" 12 8 2 3)))
+    (if suit?
+      (draw-spacesuit ctx sx sy facing swing rect)
+      (do (rect "#3b2f8f" 3 28 5 10)
+          (rect "#3b2f8f" 10 28 5 10)
+          (rect "#2a2266" (+ 3 swing) 34 5 4)
+          (rect "#2a2266" (- 10 swing) 34 5 4)
+          (rect "#c0392b" 2 15 14 14)
+          (rect "#f1c27d" (+ 7 (- swing)) 17 4 11)
+          (rect "#f1c27d" 3 3 13 13)
+          (rect "#6b3e1f" 2 0 15 5)
+          (rect "#6b3e1f" 2 0 4 10)
+          (rect "#1d1d1d" 12 8 2 3)))))
 
 (defn- draw-target [^js ctx tiles player cam-x cam-y]
   (set! (.-strokeStyle ctx) "rgba(255,255,255,0.8)")
@@ -3475,7 +3513,7 @@
                            (draw-fluffies ctx (:fluffies @state) (:realm @state) clock cam-x cam-y)
                            (draw-house-rims ctx (:houses @state) (:realm @state) cam-x cam-y)
                            (when (even? (js/Math.floor (/ (:hurt player 0) 4)))
-                             (draw-player ctx player cam-x cam-y)
+                             (draw-player ctx player cam-x cam-y space?)
                              (draw-pickaxe ctx player cam-x cam-y))
                            (when-let [levels (:levels world)]
                              (draw-ooze ctx (:tiles world) levels vw vh cam-x cam-y t))
