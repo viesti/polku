@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Serves the dev environment on this machine's tailnet name over HTTPS with `tailscale serve`,
+# then starts `npm run dev`. The forwards stay after dev stops; bin/tailnet-down removes them.
+# Needs HTTPS certificates enabled for the tailnet.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+HOST="$(tailscale status --json | node -e '
+  let s = ""
+  process.stdin.on("data", d => s += d).on("end", () => console.log(JSON.parse(s).Self.DNSName.replace(/\.$/, "")))')"
+
+tailscale serve --bg --https=443  http://localhost:3000 >/dev/null  # the app
+tailscale serve --bg --https=4777 http://localhost:4777 >/dev/null  # the Polku server
+tailscale serve --bg --https=9630 http://localhost:9630 >/dev/null  # shadow-cljs live reload
+
+echo "Serving https://$HOST on the tailnet"
+# The Polku server only accepts browser requests from the origins it knows
+POLKU_ORIGIN="https://$HOST" exec npm run dev

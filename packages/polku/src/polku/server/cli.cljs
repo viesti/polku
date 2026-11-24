@@ -14,7 +14,10 @@
 
   serve                 Start the local ingest server that the browser client posts to
       --port <n>        Port to listen on (default 4777)
-      --origin <url>    Extra allowed browser origin; repeatable. Localhost is always allowed
+      --host <addr>     Address to listen on (default 127.0.0.1, or $POLKU_HOST). Use 0.0.0.0
+                        to reach it from other machines; the CLI commands still use 127.0.0.1
+      --origin <url>    Extra allowed browser origin; repeatable. Localhost is always allowed.
+                        $POLKU_ORIGIN adds more, separated by commas
   wait                  Block until a session needs the agent, claim it, print its task brief.
                         A new session asks for a plan; an approved plan asks for the change
       --timeout <s>     Exit with code 2 if nothing arrives within this many seconds
@@ -42,6 +45,7 @@ Common options:
 (def ^:private arg-spec
   {:dir     {:type "string" :default ".polku"}
    :port    {:type "string" :default "4777"}
+   :host    {:type "string"}
    :origin  {:type "string" :multiple true :default []}
    :timeout {:type "string"}
    :message {:type "string" :short "m"}
@@ -239,7 +243,12 @@ Common options:
 (def ^:private commands
   {"serve"   (fn [{:keys [root opts]}]
                (ensure-dirs! root)
-               (http/serve {:root root :port (js/Number (:port opts)) :origins (:origin opts)}))
+               (http/serve {:root    root
+                            :port    (js/Number (:port opts))
+                            :host    (or (:host opts) (not-empty (.. js/process -env -POLKU_HOST)) "127.0.0.1")
+                            :origins (into (vec (:origin opts))
+                                           (remove str/blank?)
+                                           (some-> (.. js/process -env -POLKU_ORIGIN) (str/split #",") (->> (map str/trim))))}))
    "wait"    (fn [{:keys [root opts]}]
                (ensure-dirs! root)
                (.then (wait-for-session root (some-> (:timeout opts) js/Number))

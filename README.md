@@ -38,7 +38,7 @@ the message
 ```
 
 1. **Capture.** The widget asks for the microphone and for sharing the current tab. It records pointer positions, clicks, the element the pointer rests on, scrolls, window resizes, navigation and input activity (lengths only, never typed text). Pointer coordinates are relative to the viewport, like the frames. Speech is transcribed in the browser with the Web Speech API, and each utterance is timestamped at the moment it began. Screen frames are JPEG stills taken when the picture changes and after each click. All events carry a millisecond offset `t` from the start of the recording, and frame files are named by the same offset.
-2. **Ingest.** `polku serve` listens on 127.0.0.1:4777, accepts requests from localhost origins and writes each session to `.polku/sessions/<id>/` in the directory it was started from.
+2. **Ingest.** `polku serve` listens on 127.0.0.1:4777 (`--host` changes the address), accepts requests from localhost origins and those given with `--origin`, and writes each session to `.polku/sessions/<id>/` in the directory it was started from.
    A chat message is a session of kind `chat` without a recording. The Chat button opens a text field, and Send posts the text with the page address to `POST /messages`, which stores it as complete at once. Its brief holds the text, the page and any screenshots.
 
    The Screenshot button in the chat panel turns the pointer into a red pen over the page. Attach takes a screenshot of the tab with the drawing on top and adds it to the message as a thumbnail. The first screenshot asks to share the tab, and the sharing lasts until the message is sent or the chat panel is closed, so later screenshots do not ask again. Clicking a thumbnail opens it at full size, and its ✕ button removes it. The server stores the screenshots in the session's screenshots directory, and `get_session_recording` returns them for a chat message.
@@ -119,14 +119,15 @@ ClojureScript (with `packages/polku/src` on the source path, or the package as a
   (polku/init {:endpoint "http://localhost:4777"}))
 ```
 
-Options: `endpoint`, `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language), `languages` (the speech languages offered in the widget, defaults to `lang` followed by the browser's preferred languages) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `setLang(tag)`, `getState` and `destroy`.
+Options: `endpoint` (defaults to port 4777 on the host and protocol that served the page), `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language), `languages` (the speech languages offered in the widget, defaults to `lang` followed by the browser's preferred languages) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `setLang(tag)`, `getState` and `destroy`.
 
 The Web Speech API recognizes one language at a time and cannot detect it. In browsers that have `SpeechRecognition.available()`, the widget drops the languages it reports as unavailable. When more than one language remains, the recording panel shows a language selector. Switching restarts recognition in the new language, and the widget remembers the choice in localStorage for later recordings. Each speech event records the language it was recognized in, and the brief names it.
 
 ## CLI
 
 ```
-polku serve [--port 4777] [--origin <url>]   start the ingest server
+polku serve [--port 4777] [--host <addr>] [--origin <url>]
+                                             start the ingest server
 polku wait [--timeout <s>]                   block until a session is ready, print its brief
 polku watch -- <cmd...>                      run <cmd> with the brief on stdin for each claimed session
 polku plan [id] -m <text>                    show the plan in the user's browser for approval

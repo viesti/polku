@@ -189,14 +189,15 @@
              (send! res 404 {:error "not found"}))))))))
 
 (defn serve
-  "Starts the ingest server on the loopback interface and resolves once it is listening."
-  [{:keys [root port log] :or {port 4777 log js/console.log} :as opts}]
+  "Starts the ingest server and resolves once it is listening. It listens on the loopback
+  interface unless `host` names another address, such as 0.0.0.0 for every interface."
+  [{:keys [root port host log] :or {port 4777 host "127.0.0.1" log js/console.log} :as opts}]
   (let [^js server (create-server (assoc opts :log log))]
     (js/Promise.
      (fn [resolve reject]
        (.once server "error" reject)
-       (.listen server port "127.0.0.1"
+       (.listen server port host
                 (fn []
-                  (log (str "polku server listening on http://127.0.0.1:" (.-port (.address server))
+                  (log (str "polku server listening on http://" host ":" (.-port (.address server))
                             ", writing to " (store/sessions-dir root)))
                   (resolve server)))))))

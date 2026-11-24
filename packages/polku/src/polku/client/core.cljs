@@ -9,9 +9,15 @@
 (def ^:private lang-key "polku:lang")
 (def ^:private poll-ms 1500)
 
+(defn- default-endpoint
+  "Port 4777 on the host that served the page, so a page opened from another machine
+  reaches the server next to it."
+  []
+  (let [loc js/location]
+    (str (.-protocol loc) "//" (if (seq (.-hostname loc)) (.-hostname loc) "localhost") ":4777")))
+
 (def ^:private defaults
-  {:endpoint       "http://localhost:4777"
-   :screen         true
+  {:screen         true
    :audio          true
    :frame-interval 2000})
 
@@ -50,6 +56,7 @@
                                      (cons lang (js->clj (or js/navigator.languages #js []))))))
         chosen    (recall-lang)
         conf      (merge defaults
+                         {:endpoint (default-endpoint)}
                          (select-keys m [:endpoint :screen :audio :frame-interval])
                          {:languages languages
                           :lang      (cond

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Removes the forwards that bin/tailnet-up added. Other `tailscale serve` config is left alone.
+set -euo pipefail
+
+for port in 443 4777 9630; do
+  tailscale serve --https="$port" off
+done
+tailscale serve status
