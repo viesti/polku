@@ -430,6 +430,10 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
         ^js root (h "div" {})
         !ui      (atom {:note "" :view nil :ticker nil})]
     (.append shadow (h "style" {} css) root)
+    ;; Keys typed in the widget stop at its host, so the page's own shortcuts on window
+    ;; or document do not fire while the person writes a message
+    (doseq [t ["keydown" "keyup" "keypress"]]
+      (.addEventListener host t (fn [^js e] (.stopPropagation e))))
     (.appendChild js/document.documentElement host)
     {:host    host
      :render  (fn [state heard-only?]
