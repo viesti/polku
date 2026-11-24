@@ -1180,7 +1180,10 @@
     (.fillText ctx text tx sy))
   (set! (.-globalAlpha ctx) 1))
 
-(defn- draw-shop [^js ctx {:keys [tx ty]} vw cam-x cam-y]
+(defn- draw-shop
+  "Draws the shop, with an E key hint over its roof while the player is close enough to
+  open it."
+  [^js ctx {:keys [tx ty]} vw cam-x cam-y near?]
   (let [w (* shop-w T)
         h (* shop-h T)
         sx (js/Math.round (- (* tx T) cam-x))
@@ -1213,12 +1216,30 @@
       (set! (.-textAlign ctx) "center")
       (set! (.-fillStyle ctx) "#ffd54a")
       (icons/draw! ctx :coin (+ sx 32) (+ top 21) 1)
-      (.fillText ctx "SHOP" (+ sx 62) (+ top 31)))))
+      (.fillText ctx "SHOP" (+ sx 62) (+ top 31))
+      (when near?
+        (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+        (.fillRect ctx (- (+ sx (/ w 2)) 8) (- top 38) 16 16)
+        (set! (.-fillStyle ctx) "#ffffff")
+        (set! (.-font ctx) "bold 12px system-ui, sans-serif")
+        (.fillText ctx "E" (+ sx (/ w 2)) (- top 26))))))
 
 (defn- near-shop? [{:keys [x y]} {:keys [tx ty]}]
   (let [sx (* tx T) base (* ty T)]
     (and (< (- sx 8) (+ x player-w)) (< x (+ sx (* shop-w T) 8))
          (< (- base (* shop-h T)) (+ y player-h)) (< y (+ base 8)))))
+
+(defn- by-shop?
+  "Returns true when the player stands at the shop in the overworld."
+  [st]
+  (and (= :overworld (:realm st))
+       (near-shop? (:player st) (get-in st [:worlds :overworld :shop]))))
+
+(defn- toggle-shop
+  "Opens or closes the shop panel when the player stands at the shop, or returns nil."
+  [st]
+  (when (by-shop? st)
+    (update st :shop-open? not)))
 
 (defn- sell
   "Sells up to `n` of item `id` from the bag for coins and shows what was earned."
@@ -2883,7 +2904,7 @@
      ($ :li "Once the Lord of Goo is beaten, drones fly over the overworld and now and then land; break a landed drone with the pickaxe and a spaceship comes down somewhere nearby")
      ($ :li "Hit the spaceship with the pickaxe to fly to outer space, where gravity is weak and you can hop between asteroids; space wraps round, so flying on past one edge brings you in over the opposite one. Hit the ship again to fly home")
      ($ :li "Purple aliens float after you in space and hurt on touch; three pickaxe hits pop one for " alien-reward " coins. Touch the gold stars to collect them and sell them at the shop")
-     ($ :li "Find the shop on the surface to sell your finds and buy potions, rope and torches")))
+     ($ :li "Find the shop on the surface and press E there to sell your finds and buy potions, rope and torches")))
 
 (defn- ->b64 [^js arr]
   (let [b (js/Uint8Array. (.-buffer arr) (.-byteOffset arr) (.-byteLength arr))
@@ -3383,7 +3404,7 @@
                          (case (.-code e)
                            "KeyM" (when-not (.-repeat e) (set-menu! not))
                            "KeyE" (when-not (or (.-repeat e) (:paused? @state))
-                                    (swap! state #(or (accept-quest %) (toggle-fluffy %))))
+                                    (swap! state #(or (toggle-shop %) (accept-quest %) (toggle-fluffy %))))
                            ("Digit1" "Digit2" "Digit3" "Digit4" "Digit5" "Digit6" "Digit7" "Digit8" "Digit9" "Digit0")
                            (when-not (or (.-repeat e) (:paused? @state))
                                                              ;; Digit0 is the tenth slot
@@ -3464,7 +3485,11 @@
                                  (swap! state enter-arena))
                              _ (set-boss-hp! (get-in @state [:boss :hp]))
                              _ (open-chests! state)
-                             _ (set-at-shop! (and (home?) (near-shop? player shop)))
+                             near-shop (by-shop? @state)
+                             ;; walking away from the shop closes its panel
+                             _ (when (and (not near-shop) (:shop-open? @state))
+                                 (swap! state assoc :shop-open? false))
+                             _ (set-at-shop! (and near-shop (:shop-open? @state)))
                              _ (swap! state
                                       (fn [st]
                                         (if (<= (get-in st [:player :hp] max-hp) 0)
@@ -3496,7 +3521,7 @@
                            (when space?
                              (draw-stars ctx (:stars @state) t cam-x cam-y)
                              (draw-aliens ctx (:aliens @state) t cam-x cam-y))
-                           (when (home?) (draw-shop ctx shop vw cam-x cam-y))
+                           (when (home?) (draw-shop ctx shop vw cam-x cam-y near-shop))
                            (draw-chests ctx chests vw vh cam-x cam-y)
                            (draw-gate ctx (:gate world) (and (= :slime (:realm @state)) (:gate-open? @state))
                                       t cam-x cam-y)
