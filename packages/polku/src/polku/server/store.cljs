@@ -136,6 +136,53 @@
                       :hasTranscript (boolean (seq transcript))
                       :hasNote (some? note))))
 
+(defn create-message!
+  "Stores a typed chat message as a session of kind `chat` that is ready for an agent at once."
+  [root {:keys [text] :as meta}]
+  (let [text (str/trim (or text ""))
+        now  (js/Date.)
+        id   (new-id now)]
+    (when (str/blank? text)
+      (fail "empty message" 400))
+    (fs/mkdirSync (session-dir root id) #js {:recursive true})
+    (fs/writeFileSync (path/join (session-dir root id) "note.txt") (str text "\n"))
+    (write-manifest!
+     root
+     {:id          id
+      :kind        "chat"
+      :status      "complete"
+      :createdAt   (.toISOString now)
+      :completedAt (.toISOString now)
+      :url         (:url meta)
+      :title       (:title meta)
+      :viewport    (:viewport meta)
+      :userAgent   (:userAgent meta)
+      :lang        (:lang meta)
+      :text        text
+      :hasNote     true})))
+
+(defn- transition!
+  "Moves the session from status `from` to the status and fields in `changes`, or throws 409."
+  [root id from changes]
+  (let [m (read-manifest root id)]
+    (when-not (= from (:status m))
+      (fail (str "session is " (:status m) ", not " from) 409))
+    (write-manifest! root (merge m changes))))
+
+(defn set-plan!
+  "Stores the plan the agent proposes and waits for the user to approve or reject it."
+  [root id plan]
+  (transition! root id "claimed" {:status "planned" :plan plan :plannedAt (.toISOString (js/Date.))}))
+
+(defn decide-plan!
+  "Records the user's answer to the plan. `decision` is \"approve\" or \"reject\"."
+  [root id decision]
+  (let [status (case decision
+                 "approve" "approved"
+                 "reject"  "rejected"
+                 (fail "decision must be approve or reject" 400))]
+    (transition! root id "planned" {:status status :progress [] :decidedAt (.toISOString (js/Date.))})))
+
 (defn add-progress!
   "Appends a step to the progress the agent reports while it works, and returns the manifest."
   [root id text]

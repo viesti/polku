@@ -34,7 +34,7 @@
                   (catch :default _ (throw (ex-info "invalid JSON" {:status 400}))))))))
 
 (defn- public-status [m]
-  (select-keys m [:id :status :message :counts :progress]))
+  (select-keys m [:id :kind :status :message :counts :progress :plan :text]))
 
 (def ^:private routes
   [["GET" #"/health"
@@ -87,9 +87,25 @@
                  (log (str "session " (:id m) " started (" (or (:url m) "unknown page") ")"))
                  (public-status m)))))]
 
+   ["POST" #"/messages"
+    (fn [{:keys [root req log]}]
+      (.then (read-json req)
+             (fn [body]
+               (let [m (store/create-message! root (js->clj body :keywordize-keys true))]
+                 (log (str "message " (:id m) " received (" (or (:url m) "unknown page") ")"))
+                 (public-status m)))))]
+
    ["GET" #"/sessions/([^/]+)"
     (fn [{:keys [root id]}]
       (public-status (store/read-manifest root id)))]
+
+   ["POST" #"/sessions/([^/]+)/decision"
+    (fn [{:keys [root id req log]}]
+      (.then (read-json req)
+             (fn [^js body]
+               (let [m (store/decide-plan! root id (.-decision body))]
+                 (log (str "plan for " id " " (:status m)))
+                 (public-status m)))))]
 
    ["POST" #"/sessions/([^/]+)/events"
     (fn [{:keys [root id req]}]

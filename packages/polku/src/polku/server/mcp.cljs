@@ -21,7 +21,7 @@
 
 (def ^:private session-id-prop
   {:type        "string"
-   :description "Session id. Defaults to the latest claimed session, or the latest session when none is claimed."})
+   :description "Session id. Defaults to the latest session the agent is planning or building, or the latest session when there is none."})
 
 (def ^:private range-props
   {:from_ms {:type "number" :description "Only include material at or after this offset in milliseconds."}
@@ -37,7 +37,8 @@
   [(tool "list_sessions"
          "Lists recorded sessions, oldest first, with their status, page and duration."
          {:status {:type        "string"
-                   :enum        ["recording" "complete" "claimed" "done"]
+                   :enum        ["recording" "complete" "claimed" "planned" "approved" "building"
+                                 "rejected" "done"]
                    :description "Only sessions with this status."}})
    (tool "get_context_summary"
          (str "Returns the brief for a session: what the user typed and said, a timeline of clicks and "
@@ -74,7 +75,7 @@
   [root requested]
   (let [sessions (store/list-sessions root)]
     (or requested
-        (:id (last (filter #(= "claimed" (:status %)) sessions)))
+        (:id (last (filter #(#{"claimed" "building"} (:status %)) sessions)))
         (:id (last sessions))
         (throw (ex-info "No sessions have been recorded yet." {})))))
 

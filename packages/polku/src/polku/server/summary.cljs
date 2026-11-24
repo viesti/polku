@@ -43,11 +43,29 @@
                  text (conj (str "- " (fmt-t (:t e)) " " text
                                  (when new? (str " — frame " (rel (:file frame))))))))))))
 
-(defn build-summary
-  "Describes one session: what the user asked for, a timeline, and where the artifacts are."
-  [root id]
-  (let [m      (store/read-manifest root id)
-        dir    (store/session-dir root id)
+(defn- chat-summary
+  "Describes a typed chat message, which has no recording behind it."
+  [root id m]
+  (str/join
+   "\n"
+   [(str "# Polku message " id)
+    ""
+    (str "- Page: " (or (:url m) "unknown") (when (seq (:title m)) (str " (\"" (:title m) "\")")))
+    (str "- Sent: " (:createdAt m))
+    (str "- Session directory: "
+         (or (not-empty (path/relative (js/process.cwd) (store/session-dir root id))) "."))
+    ""
+    "## What the user asked for"
+    ""
+    "The user typed this message in the widget. There is no recording, so there are no frames, speech or timeline."
+    ""
+    (str "> " (str/replace (:text m) "\n" "\n> "))
+    ""]))
+
+(defn- recording-summary
+  "Describes a recording with what the user typed and said, a timeline, and where the artifacts are."
+  [root id m]
+  (let [dir    (store/session-dir root id)
         rel    (fn [file] (or (not-empty (path/relative (js/process.cwd) file)) "."))
         events (store/read-events root id)
         frames (store/list-frames root id)
@@ -105,27 +123,62 @@
       [(str "- " (rel (path/join dir "dom.html")) " is the page DOM when the user stopped recording.")
        ""]))))
 
-(defn build-task
-  "Returns the full prompt for an agent: the session brief followed by how to finish."
+(defn build-summary
+  "Describes one session: what the user asked for and, for a recording, a timeline and where the artifacts are."
   [root id]
-  (str/join
-   "\n"
-   [(build-summary root id)
-    "## What to do"
-    ""
-    "1. Read the frames that matter (they are images) to see what the user was looking at and pointing to."
-    (str "2. Once you have decided how to do it, tell the user your plan in one or two short sentences, "
-         "including the choices they left open (what something looks like, how it behaves): "
-         "`npx polku progress " id " -m \"<your plan>\"`. It appears in their browser while you work.")
-    (str "3. Change the application source to do what the user asked. The app is running with live "
-         "reload, so saved changes appear in the user's browser without a restart. Report with "
-         "`npx polku progress " id " -m \"<step>\"` when you start each part of the plan, when you make a "
-         "decision that changes what they will see, and when you start checking the result. The user does "
-         "not see this terminal, so send anything here they would care about to the widget too. Do not "
-         "report problems in your own work (compile errors, crashes, retries), and do not report every file edit.")
-    "4. Check that the change compiled and the app still works."
-    (str "5. Report back to the user's browser with a one-sentence, non-technical message: "
-         "`npx polku done " id " -m \"<what changed>\"`.")
-    ""
-    "Write progress and done messages for a non-developer, in the language the user spoke or typed in."
-    ""]))
+  (let [m (store/read-manifest root id)]
+    (if (= "chat" (:kind m))
+      (chat-summary root id m)
+      (recording-summary root id m))))
+
+(defn- plan-steps [id chat?]
+  (concat
+   (when-not chat?
+     ["- Read the frames that matter (they are images) to see what the user was looking at and pointing to."])
+   ["- Decide how you would do it. Read the source as much as you need, but do not change any files yet."
+    (str "- Send the plan to the user's browser: `npx polku plan " id " -m \"<plan>\"`. Write two to four "
+         "short sentences for a non-developer that say what will change on the page, including the choices "
+         "they left open (what something looks like, how it behaves). The user approves or rejects it there.")
+    (str "- If the message is a question, or something you cannot do, answer it instead with "
+         "`npx polku done " id " -m \"<answer>\"` and send no plan.")
+    (str "- Then stop working on this request. `npx polku wait` returns it again with the plan once the user "
+         "approves it. A rejected plan does not come back; the user sends a new request instead.")]))
+
+(defn- build-steps [id]
+  ["1. Change the application source to do what the approved plan says. The app is running with live reload, so saved changes appear in the user's browser without a restart."
+   (str "2. Report with `npx polku progress " id " -m \"<step>\"` when you start each part of the plan, when you "
+        "make a decision that changes what they will see, and when you start checking the result. The user does "
+        "not see this terminal, so send anything here they would care about to the widget too. Do not report "
+        "problems in your own work (compile errors, crashes, retries), and do not report every file edit.")
+   "3. Check that the change compiled and the app still works."
+   (str "4. Report back to the user's browser with a one-sentence, non-technical message: "
+        "`npx polku done " id " -m \"<what changed>\"`.")])
+
+(defn build-task
+  "Returns the full prompt for an agent. A claimed session asks for a plan; a building one
+  carries the plan the user approved and asks for the change."
+  [root id]
+  (let [m      (store/read-manifest root id)
+        build? (= "building" (:status m))]
+    (str/join
+     "\n"
+     (concat
+      [(build-summary root id)]
+      (if build?
+        (concat ["## Approved plan"
+                 ""
+                 "The user read and approved this plan in their browser:"
+                 ""
+                 (str "> " (str/replace (or (:plan m) "") "\n" "\n> "))
+                 ""
+                 "## What to do"
+                 ""]
+                (build-steps id))
+        (concat ["## What to do"
+                 ""
+                 "Plan the change and ask the user to approve it before you change anything."
+                 ""]
+                (plan-steps id (= "chat" (:kind m)))))
+      [""
+       "Write plans, progress and done messages for a non-developer, in the language the user spoke or typed in."
+       ""]))))

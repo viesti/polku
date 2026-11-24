@@ -1,25 +1,36 @@
 ---
 name: polku
-description: Wait for requests that a user records in the running web app (voice, pointer, screen) and implement each one in the source as it arrives. Use when asked to start polku, watch for polku sessions, or work on recorded requests.
+description: Wait for requests that a user records or types in the running web app (voice, pointer, screen, chat), propose a plan for each one, and implement it in the source once the user approves the plan. Use when asked to start polku, watch for polku sessions, or work on recorded requests.
 ---
 
 # Polku loop
 
-A person is using the running app in their browser. The Polku widget in the page records what they say, where they point and what the screen shows, and the local Polku server writes each recording to `.polku/sessions/<id>/`. Your job is to turn each recording into a source change that they see through live reload, then wait for the next one.
+A person is using the running app in their browser. The Polku widget in the page records what they say, where they point and what the screen shows, or takes a typed chat message, and the local Polku server writes each request to `.polku/sessions/<id>/`. Your job is to propose a plan for each request, and once the person approves it in the widget, to turn it into a source change that they see through live reload.
+
+Every request goes through two turns of `npx polku wait`. The first brief asks for a plan, and you must not change any files during it. The second brief arrives only if the person approves the plan, and repeats the request together with the approved plan. A rejected plan never comes back; the person sends a new request instead.
 
 The person is usually a product owner or business user, not a developer. They watch the browser, not this terminal.
 
 ## Loop
 
-1. Start `npx polku wait` as a background command. It blocks until a recording is ready, then prints a task brief and exits. Do not poll; you are notified when it exits.
-2. When it exits, read its output. The brief contains what the user typed or said, a timeline of clicks and pointer rests with the element under the pointer, and paths to screen frames.
-3. Look at the screen at the moments the timeline points to. With the Polku MCP server connected, call `get_session_recording` (narrow it with `from_ms` and `to_ms`); otherwise read the JPEG files named in the brief. The last frame shows the page as the user left it. Words like "this", "here" or "that button" refer to the element under the pointer at that moment in the timeline.
-4. When the request involves a position, a size, an area or an order on the page, read the pointer path around the words that describe it (see "Reading the pointer" below) before you decide.
-5. Once you have decided how to do it, tell the user your plan in one or two short sentences: `npx polku progress <id> -m "Adding a table of orders under a heading, newest orders first."` Include the choices they left open, such as what an enemy looks like or how it moves, because they cannot see those until the end. The message appears in the widget before anything on the page has changed, and lets them see early when you have misread them.
-6. Make the change in the application source. Follow the project's own instructions (CLAUDE.md) for where code lives and how reload works. Keep the change as small as the request; do not restart dev processes unless reload cannot pick the change up. Report progress as you go (see below).
-7. Check that the change compiled and that the app still loads.
-8. Tell the user what happened in one plain sentence: `npx polku done <id> -m "Added a title to the page."` The message appears in the widget in their browser. If you could not do what they asked, or had to guess, say that in the message instead.
-9. Go back to step 1.
+1. Start `npx polku wait` as a background command. It blocks until a request needs you, then prints a task brief and exits. Do not poll; you are notified when it exits.
+2. When it exits, read its output. The brief says whether to plan or to build:
+   - "Plan the change" means a new request. Go to step 3.
+   - "Approved plan" means the person approved your plan. Go to step 7.
+
+Planning a request:
+
+3. Read the request. A recording's brief contains what the user typed or said, a timeline of clicks and pointer rests with the element under the pointer, and paths to screen frames. A chat message's brief contains only the typed text and the page it was sent from.
+4. For a recording, look at the screen at the moments the timeline points to. With the Polku MCP server connected, call `get_session_recording` (narrow it with `from_ms` and `to_ms`); otherwise read the JPEG files named in the brief. The last frame shows the page as the user left it. Words like "this", "here" or "that button" refer to the element under the pointer at that moment in the timeline. When the request involves a position, a size, an area or an order on the page, read the pointer path around the words that describe it (see "Reading the pointer" below).
+5. Decide how you would do it. Read the source as much as you need, but do not edit anything.
+6. Send the plan: `npx polku plan <id> -m "Adding a table of orders under a heading, newest orders first."` Write two to four short sentences that say what will change on the page, and include the choices the person left open, such as what an enemy looks like or how it moves. The widget shows the plan with buttons to approve or reject it. If the request is a question or something you cannot do, answer with `npx polku done <id> -m "<answer>"` instead of a plan. Go back to step 1; do not wait for the answer in any other way.
+
+Building an approved plan:
+
+7. Make the change in the application source, as the approved plan describes. Follow the project's own instructions (CLAUDE.md) for where code lives and how reload works. Keep the change as small as the request; do not restart dev processes unless reload cannot pick the change up. Report progress as you go (see below).
+8. Check that the change compiled and that the app still loads.
+9. Tell the user what happened in one plain sentence: `npx polku done <id> -m "Added a title to the page."` The message appears in the widget in their browser. If you could not do what the plan said, or had to deviate from it, say that in the message.
+10. Go back to step 1.
 
 ## Reading the pointer
 
@@ -41,12 +52,12 @@ The user watches the page while you work, and early in a request the page often 
 - Do not report problems in your own work, such as compile errors, a crash you caused, a failed check or a retry. The user sees only what is being built. If fixing takes a while, describe the part you are finishing ("Finishing the slimes' movement").
 - Write for the person, not a developer: "Saving orders to the database" rather than "Adding migration 002-orders.sql". One short sentence, no file names.
 - Several edits towards one goal share a step. Do not report every file edit.
-- Write progress and done messages in the language the user spoke or typed in.
+- Write plans, progress and done messages in the language the user spoke or typed in.
 
 ## Notes
 
 - Edit source files with the Edit and Write tools, not with shell commands such as `sed -i`. A shell edit can stop for a permission prompt in this terminal, and the user, who watches only the browser, waits without knowing why.
 - Speech recognition mis-hears words. Prefer the reading that fits the frames and the app.
-- If a request is ambiguous, pick the most likely reading, implement it, and state the assumption in the `done` message. The user answers by recording again.
+- If a request is ambiguous, pick the most likely reading and state the assumption in the plan. The user rejects the plan if the reading is wrong.
 - The MCP tools `get_context_summary` and `get_interaction_events` return the brief and the raw events, such as the full pointer path with `types: ["move"]`. Without the MCP server, `npx polku summary [id]` and `npx polku events [id] --type move` print the same.
 - `npx polku wait` reads files and keeps waiting even when the ingest server is down. If the user says they sent something and nothing arrives, check `curl -s localhost:4777/health` and start `npx polku serve` in the background if it does not answer.

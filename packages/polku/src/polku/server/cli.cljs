@@ -15,10 +15,12 @@
   serve                 Start the local ingest server that the browser client posts to
       --port <n>        Port to listen on (default 4777)
       --origin <url>    Extra allowed browser origin; repeatable. Localhost is always allowed
-  wait                  Block until a recorded session is ready, claim it, print its task brief
+  wait                  Block until a session needs the agent, claim it, print its task brief.
+                        A new session asks for a plan; an approved plan asks for the change
       --timeout <s>     Exit with code 2 if nothing arrives within this many seconds
-  watch -- <cmd...>     For each new session, run <cmd> with the task brief on stdin
+  watch -- <cmd...>     For each claimed session, run <cmd> with the task brief on stdin
                         e.g. polku watch -- claude -p --permission-mode acceptEdits
+  plan [id] -m <text>   Show <text> in the user's browser as the plan for them to approve or reject
   progress [id] -m <text>
                         Show <text> in the user's browser as the step the agent is on
   done [id] -m <text>   Mark a session finished and show <text> in the user's browser
@@ -65,12 +67,26 @@ Common options:
         last
         :id)))
 
-(defn- claim-next!
-  "Claims the oldest complete session and returns its id, or nil when none is ready."
+(def ^:private active #{"claimed" "building"})
+
+(defn- latest-active
+  "Returns the id of the newest session the agent is planning or building."
   [root]
-  (when-let [id (:id (first (filter #(= "complete" (:status %)) (store/list-sessions root))))]
-    (store/update-manifest! root id assoc :status "claimed" :claimedAt (.toISOString (js/Date.)))
-    id))
+  (:id (last (filter #(active (:status %)) (store/list-sessions root)))))
+
+(defn- claim-next!
+  "Claims the next session that needs the agent and returns its id, or nil when none is ready.
+  An approved plan goes first, since its user has already waited for the plan. It becomes
+  `building`; a newly completed session becomes `claimed` for planning."
+  [root]
+  (let [sessions (store/list-sessions root)
+        now      (.toISOString (js/Date.))]
+    (if-let [id (:id (first (filter #(= "approved" (:status %)) sessions)))]
+      (do (store/update-manifest! root id assoc :status "building" :buildingAt now)
+          id)
+      (when-let [id (:id (first (filter #(= "complete" (:status %)) sessions)))]
+        (store/update-manifest! root id assoc :status "claimed" :claimedAt now)
+        id))))
 
 (defn- wait-for-session
   "Resolves with the id of the next claimed session, or nil after `timeout-s` seconds."
@@ -183,10 +199,12 @@ Common options:
            (js/console.error (str "polku: session " id " → " (str/join " " command)))
            (.then (run-with-task command (write-task! root id))
                   (fn [code]
-                    (when-not (= "done" (:status (store/read-manifest root id)))
-                      (mark-done! root id (if (zero? code)
-                                            "The change is in."
-                                            "The agent stopped before finishing this request.")))
+                    (case (:status (store/read-manifest root id))
+                      "claimed"  (mark-done! root id "The agent stopped without proposing a plan.")
+                      "building" (mark-done! root id (if (zero? code)
+                                                       "The change is in."
+                                                       "The agent stopped before finishing this request."))
+                      nil)
                     (watch-loop root command))))))
 
 (defn- install-skill! []
@@ -235,17 +253,24 @@ Common options:
                (ensure-dirs! root)
                (js/console.error (str "polku: watching " (store/sessions-dir root)))
                (watch-loop root args))
+   "plan"    (fn [{:keys [root opts args]}]
+               (let [id   (or (first args) (latest root "claimed"))
+                     text (some-> (:message opts) str/trim not-empty)]
+                 (when-not text (fail! "plan needs a message: polku plan [id] -m <text>"))
+                 (when-not id (fail! "no claimed session to plan"))
+                 (store/set-plan! root id text)
+                 (println "plan for" id "sent; polku wait returns the session once the user approves it")))
    "progress" (fn [{:keys [root opts args]}]
-                (let [id   (or (first args) (latest root "claimed"))
+                (let [id   (or (first args) (latest-active root))
                       text (some-> (:message opts) str/trim not-empty)]
                   (when-not text (fail! "progress needs a message: polku progress [id] -m <text>"))
                   (when-not id (fail! "no claimed session to report progress on"))
                   (let [status (:status (store/read-manifest root id))]
-                    (when-not (= "claimed" status)
+                    (when-not (active status)
                       (fail! (str "session " id " is " status ", so the user no longer sees progress for it"))))
                   (store/add-progress! root id text)))
    "done"    (fn [{:keys [root opts args]}]
-               (let [id (or (first args) (latest root "claimed"))]
+               (let [id (or (first args) (latest-active root))]
                  (when-not id (fail! "no claimed session to finish"))
                  (mark-done! root id (:message opts))
                  (println "session" id "marked done")))

@@ -1,6 +1,6 @@
 # Polku
 
-Polku lets someone using a running web app say what they want changed, and hands that request to a coding agent working in the app's source. The person records in the browser: they talk, point and click. The agent receives what they said, what they pointed at and what the screen showed, edits the code, and live reload shows the result in the same browser tab.
+Polku lets someone using a running web app say what they want changed, and hands that request to a coding agent working in the app's source. The person records in the browser (they talk, point and click) or types a chat message. The agent receives what they said, what they pointed at and what the screen showed, and answers with a plan. Once the person approves the plan in the widget, the agent edits the code, and live reload shows the result in the same browser tab.
 
 This repository is a local proof of concept. Design documents are numbered in the doc directory, starting with the original specification, [01-polku-proof-of-concept.md](doc/01-polku-proof-of-concept.md).
 
@@ -25,9 +25,13 @@ widget records      ──▶    writes .polku/sessions/<id>
 voice, pointer,            manifest.json, events.jsonl,
 screen frames              frames/*.jpg, audio.webm,
                            transcript.txt, dom.html
-"Stop & send"       ──▶    status: complete      ──▶    `polku wait` exits with a task brief
-                                                        agent reads brief and frames,
-                                                        edits source, app live-reloads
+or a chat message   ──▶    POST /messages writes
+                           manifest.json, note.txt
+"Stop & send"/"Send"──▶    status: complete      ──▶    `polku wait` exits with a plan brief
+                                                        agent reads brief and frames
+widget shows plan   ◀──    status: planned       ◀──    `polku plan <id> -m "..."`
+"Approve"           ──▶    status: approved      ──▶    `polku wait` exits with a build brief
+                                                        agent edits source, app live-reloads
 widget lists steps  ◀──    progress in manifest  ◀──    `polku progress <id> -m "..."`
 widget shows        ◀──    status: done          ◀──    `polku done <id> -m "..."`
 the message
@@ -35,9 +39,11 @@ the message
 
 1. **Capture.** The widget asks for the microphone and for sharing the current tab. It records pointer positions, clicks, the element the pointer rests on, scrolls, window resizes, navigation and input activity (lengths only, never typed text). Pointer coordinates are relative to the viewport, like the frames. Speech is transcribed in the browser with the Web Speech API, and each utterance is timestamped at the moment it began. Screen frames are JPEG stills taken when the picture changes and after each click. All events carry a millisecond offset `t` from the start of the recording, and frame files are named by the same offset.
 2. **Ingest.** `polku serve` listens on 127.0.0.1:4777, accepts requests from localhost origins and writes each session to `.polku/sessions/<id>/` in the directory it was started from.
-3. **Handoff.** `polku wait` blocks until a session is complete, claims it, writes the brief to `.polku/CURRENT_TASK.md` and prints it. The brief merges speech, clicks and pointer rests into one timeline and names the frame that shows each moment.
-4. **Change.** The agent edits the source and relies on the app's own live reload. When a request is about a place, a size or an order on the page, the agent also reads the pointer path around the words that describe it, since a gesture such as circling a gap shows only there. Conventions fill in what the gesture leaves open. Early in a request the page often shows nothing new for a while, so the agent reports its plan, each part of the work it starts and each decision the person will see with `polku progress`. Problems in its own work are not reported. The widget lists the steps, with the latest marked as in progress.
-5. **Report.** `polku done` stores a one-sentence message that the widget shows to the person. The agent writes progress and done messages in the language the person used.
+   A chat message is a session of kind `chat` without a recording. The Chat button opens a text field, and Send posts the text with the page address to `POST /messages`, which stores it as complete at once. Its brief holds only the text and the page.
+3. **Handoff.** `polku wait` blocks until a session needs the agent, claims it, writes the brief to `.polku/CURRENT_TASK.md` and prints it. The brief merges speech, clicks and pointer rests into one timeline and names the frame that shows each moment.
+4. **Plan.** A newly claimed session (status `claimed`) asks the agent for a plan and forbids changing files. The agent sends the plan with `polku plan`, and the widget shows it with an Approve button. Rejecting a chat message's plan reopens the text field with the message for editing. Rejecting a recording's plan either discards it, so the person records again, or opens the plan text in the chat field for editing ("Edit as text"). A rejected session is never handed to the agent again. Approving makes the session `approved`, and the next `polku wait` claims it as `building`, with the approved plan in the brief. Approved plans are claimed before new requests.
+5. **Change.** The agent edits the source and relies on the app's own live reload. When a request is about a place, a size or an order on the page, the agent also reads the pointer path around the words that describe it, since a gesture such as circling a gap shows only there. Conventions fill in what the gesture leaves open. Early in a request the page often shows nothing new for a while, so the agent reports each part of the work it starts and each decision the person will see with `polku progress`. Problems in its own work are not reported. The widget lists the steps, with the latest marked as in progress.
+6. **Report.** `polku done` stores a one-sentence message that the widget shows to the person. The agent writes progress and done messages in the language the person used.
 
 ## Try it with the demo
 
@@ -62,11 +68,11 @@ npm run agent
 
 `npm run agent` opens Claude Code with a first prompt that starts the Polku loop. In a Claude Code session that is already open, type `/polku` instead. Until one of the two has happened, recordings wait in .polku/sessions with status `complete`.
 
-Then, in the browser: press Record, allow the microphone and tab sharing, say or type what you want ("add a heading that says Orders, and under it a table of orders with customer and amount"), and press Stop & send. The widget shows when the agent picks the request up and what it did.
+Then, in the browser: press Record, allow the microphone and tab sharing, say or type what you want ("add a heading that says Orders, and under it a table of orders with customer and amount"), and press Stop & send. Or press Chat, type the request and press Send. The widget shows the agent's plan, and the agent starts changing the app only after you press Approve. The widget then lists the steps and finally what the agent did.
 
 To return the demo to the blank page, stop `npm run dev` and the agent, then run `bb reset` in the demo directory (needs [Babashka](https://babashka.org)). It lists the uncommitted changes under src and resources, asks for confirmation, then discards them, recreates the database and deletes the recordings.
 
-To run the agent headless instead, with one fresh `claude -p` run per request:
+To run the agent headless instead, with one fresh `claude -p` run for each plan and another for each approved plan:
 
 ```sh
 npx polku watch -- claude -p --permission-mode acceptEdits
@@ -120,7 +126,8 @@ The Web Speech API recognizes one language at a time and cannot detect it. In br
 ```
 polku serve [--port 4777] [--origin <url>]   start the ingest server
 polku wait [--timeout <s>]                   block until a session is ready, print its brief
-polku watch -- <cmd...>                      run <cmd> with the brief on stdin for each session
+polku watch -- <cmd...>                      run <cmd> with the brief on stdin for each claimed session
+polku plan [id] -m <text>                    show the plan in the user's browser for approval
 polku progress [id] -m <text>                show the step the agent is on in the user's browser
 polku done [id] -m <text>                    finish a session and message the user
 polku summary [id]                           print a session's brief

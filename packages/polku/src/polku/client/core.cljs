@@ -113,13 +113,22 @@
                                   (apply! (merge {:reply (.-message s)}
                                                  (if (shown?) {:view :done} {:hidden :done}))))
 
+                              ;; Polling stops here and resumes once the user approves the plan
+                              (= "planned" (.-status s))
+                              (apply! (merge {:status "planned" :plan (.-plan s) :kind (.-kind s) :text (.-text s)}
+                                             (if (shown?) {:view :review} {:hidden :review})))
+
+                              (= "rejected" (.-status s))
+                              (do (remember! nil)
+                                  (apply! (if (shown?) {:view :idle :hidden nil} {:hidden nil})))
+
                               :else
                               (let [status   (.-status s)
                                     progress (mapv #(.-text ^js %) (or (.-progress s) #js []))]
                                 (when (and (or (shown?) (= :waiting (:hidden @!state)))
                                            (not= [status progress]
                                                  [(:status @!state) (:progress @!state)]))
-                                  (apply! {:status status :progress progress}))
+                                  (apply! {:status status :progress progress :plan (.-plan s)}))
                                 (poll! ctx id)))))
                    ;; The server may be restarting, so the next poll tries again
                    (.catch (fn [_] (poll! ctx id))))))
@@ -134,12 +143,84 @@
       (-> ((:stop rec) note)
           (.then (fn [id]
                    (remember! id)
-                   (set-state! {:view :waiting :hidden nil :id id :status "complete" :progress []})
+                   (set-state! {:view :waiting :hidden nil :id id :kind "recording" :status "complete"
+                                :progress [] :plan nil})
                    (poll! ctx id)
                    id))
           (.catch (fn [^js err]
                     (set-state! {:view :error :message (str "Sending failed: " (.-message err))})
                     nil))))))
+
+(defn- page-meta []
+  {:url       js/location.href
+   :title     js/document.title
+   :viewport  {:w js/window.innerWidth :h js/window.innerHeight :dpr js/window.devicePixelRatio}
+   :userAgent js/navigator.userAgent})
+
+(defn- fetch-json
+  "Resolves with the parsed body of a successful response and rejects with the server's error otherwise."
+  [url init]
+  (-> (js/fetch url init)
+      (.then (fn [^js res]
+               (.then (.json res)
+                      (fn [^js body]
+                        (if (.-ok res)
+                          (js->clj body :keywordize-keys true)
+                          (throw (js/Error. (or (.-error body) (str "HTTP " (.-status res))))))))))))
+
+(defn- post-json [url body]
+  (fetch-json url #js {:method  "POST"
+                       :headers #js {"Content-Type" "application/json"}
+                       :body    (js/JSON.stringify (clj->js body))}))
+
+(defn- open-chat!
+  "Shows the message field, filled with `text` or else with the draft left from the last time."
+  [{:keys [!state set-state!]} text]
+  (when (#{:idle :review} (:view @!state))
+    (set-state! {:view :chat :draft (or text (:draft @!state)) :chat-error nil})))
+
+(defn- close-chat!
+  "Returns to the bar and keeps the unsent text as the draft."
+  [{:keys [set-state!]} text]
+  (set-state! {:view :idle :draft text :chat-error nil}))
+
+(defn- send-chat!
+  "Sends the typed message to the agent, which answers with a plan to approve."
+  [{:keys [config !state set-state!] :as ctx} text]
+  (let [text (str/trim (or text ""))]
+    (when (and (seq text) (= :chat (:view @!state)))
+      (set-state! {:view :sending})
+      (-> (post-json (str (:endpoint config) "/messages")
+                     (assoc (page-meta) :text text :lang (:lang @!state)))
+          (.then (fn [{:keys [id]}]
+                   (remember! id)
+                   (set-state! {:view :waiting :hidden nil :id id :kind "chat" :status "complete"
+                                :progress [] :plan nil :draft nil})
+                   (poll! ctx id)))
+          (.catch (fn [^js err]
+                    (set-state! {:view       :chat
+                                 :draft      text
+                                 :chat-error (if (= "not found" (.-message err))
+                                               "The Polku server is older than this widget. Restart it to send messages."
+                                               (str "Sending failed: " (.-message err)))})))))))
+
+(defn- answer-plan!
+  "Sends the user's answer to the plan on screen. Approving resumes polling until the agent
+  is done. Rejecting either opens the message field with `draft` or returns to the bar."
+  [{:keys [config !state set-state!] :as ctx} decision draft]
+  (let [id (:id @!state)]
+    (when (= :review (:view @!state))
+      (if (= "approve" decision)
+        (set-state! {:view :waiting :status "approved" :progress []})
+        (do (remember! nil)
+            (if draft
+              (set-state! {:view :chat :draft draft :chat-error nil})
+              (set-state! {:view :idle :hidden nil}))))
+      (-> (post-json (str (:endpoint config) "/sessions/" id "/decision") {:decision decision})
+          (.then (fn [_] (when (= "approve" decision) (poll! ctx id))))
+          (.catch (fn [^js err]
+                    (when (= "approve" decision)
+                      (set-state! {:view :error :message (str "Approving failed: " (.-message err))}))))))))
 
 (defn- cancel! [{:keys [!recorder set-state!]}]
   (when-let [rec @!recorder]
@@ -181,17 +262,6 @@
 
 (defn- set-history! [{:keys [!state set-state!]} changes]
   (set-state! {:history (merge (:history @!state) changes)}))
-
-(defn- fetch-json
-  "Resolves with the parsed body of a successful response and rejects with the server's error otherwise."
-  [url init]
-  (-> (js/fetch url init)
-      (.then (fn [^js res]
-               (.then (.json res)
-                      (fn [^js body]
-                        (if (.-ok res)
-                          (js->clj body :keywordize-keys true)
-                          (throw (js/Error. (or (.-error body) (str "HTTP " (.-status res))))))))))))
 
 (defn- load-history! [{:keys [config] :as ctx}]
   (set-history! ctx {:loading? true})
@@ -264,7 +334,7 @@
   [{:keys [!state set-state!]}]
   (let [v (:view @!state)]
     (set-state! (cond-> {:view :idle}
-                  (#{:waiting :done} v) (assoc :hidden v)))))
+                  (#{:waiting :done :review} v) (assoc :hidden v)))))
 
 (defn- show-task! [{:keys [!state set-state!]}]
   (when-let [v (and (= :idle (:view @!state)) (:hidden @!state))]
@@ -291,6 +361,12 @@
             w         (widget/mount {:start    #(start-recorder! (assoc ctx :host (:host @!widget)) nil)
                                      :stop     #(stop-recorder! ctx %)
                                      :cancel   #(cancel! ctx)
+                                     :open-chat  #(open-chat! ctx nil)
+                                     :close-chat #(close-chat! ctx %)
+                                     :send-chat  #(send-chat! ctx %)
+                                     :approve    #(answer-plan! ctx "approve" nil)
+                                     :revise     #(answer-plan! ctx "reject" %)
+                                     :discard    #(answer-plan! ctx "reject" nil)
                                      :dismiss  #(dismiss! ctx)
                                      :show-task #(show-task! ctx)
                                      :set-lang #(set-lang! ctx %)

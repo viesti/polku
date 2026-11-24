@@ -9,7 +9,7 @@
     "css": "tailwindcss -i src/css/app.css -o resources/public/css/app.css --watch=always",
     "api": "clojure -M:dev",
     "polku": "polku serve",
-    "agent": "claude \"Use the polku skill: start waiting for recordings and implement each one as it arrives.\"",
+    "agent": "claude \"Use the polku skill: start waiting for requests, propose a plan for each one and implement it once the user approves the plan.\"",
     "dev": "bin/db start && concurrently --kill-others-on-fail -n api,cljs,css,polku,open -c blue,green,magenta,yellow,gray npm:api npm:cljs npm:css npm:polku npm:open 2>&1 | tee .dev.log",
     "open": "bin/open-when-ready"
   },

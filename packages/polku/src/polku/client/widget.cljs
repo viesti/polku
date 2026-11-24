@@ -70,6 +70,11 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 .cmd { margin: 8px 0 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
   font: 12px/1.45 ui-monospace, monospace; background: #111827; color: #f9fafb; border-radius: 8px; padding: 8px 10px; }
 .deny { background: #fee2e2; color: #991b1b; }
+.chat textarea { min-height: 90px; margin-top: 8px; }
+.plan { border-color: #2563eb; }
+.plan .head::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #2563eb; flex: none; }
+.plan .msg { white-space: pre-line; }
+.pill .mark { width: 8px; height: 8px; border-radius: 50%; background: #2563eb; flex: none; }
 ")
 
 (defn- h
@@ -135,6 +140,58 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
        (h "div" {:class "row"}
           (h "button" {:class "primary" :onclick (fn [_] (stop (take-note)))} "Stop & send")
           (h "button" {:class "ghost" :onclick (fn [_] (take-note) (cancel))} "Cancel")))))
+
+(defn- chat-view [{:keys [chat-error]} {:keys [send-chat close-chat]} !ui]
+  (let [^js input (h "textarea"
+                     {:placeholder "Write what you want changed"
+                      :oninput     (fn [^js e] (swap! !ui assoc :chat (.-value (.-target e))))
+                      :onkeydown   (fn [^js e]
+                                     (when (and (= "Enter" (.-key e)) (or (.-metaKey e) (.-ctrlKey e)))
+                                       (.preventDefault e)
+                                       (send-chat (:chat @!ui))))})]
+    (set! (.-value input) (:chat @!ui))
+    ;; The field is attached to the page only after this view is returned
+    (js/setTimeout (fn []
+                     (.focus input)
+                     (let [n (.. input -value -length)] (.setSelectionRange input n n)))
+                   0)
+    (h "div" {:class "panel chat"}
+       (h "div" {:class "head"} "Message to the agent")
+       (when chat-error (h "p" {:class "msg error"} chat-error))
+       input
+       (h "div" {:class "row"}
+          (h "button" {:class "primary" :title "Send (⌘/Ctrl + Enter)"
+                       :onclick (fn [_] (send-chat (:chat @!ui)))}
+             "Send")
+          (h "button" {:class "ghost" :onclick (fn [_] (close-chat (:chat @!ui)))} "Cancel")))))
+
+(defn- review-view [{:keys [plan kind text]} {:keys [approve revise discard]}]
+  (let [chat? (= "chat" kind)]
+    (h "div" {:class "panel plan"}
+       (h "div" {:class "head"} "The agent's plan")
+       (h "p" {:class "msg"} plan)
+       (h "p" {:class "note"} "Nothing changes until you approve the plan.")
+       (if chat?
+         (h "div" {:class "row"}
+            (h "button" {:class "primary" :onclick (fn [_] (approve))} "Approve")
+            (h "button" {:class "ghost" :title "Reject the plan and edit your message"
+                         :onclick (fn [_] (revise text))}
+               "Edit message"))
+         (h "div" {:class "row"}
+            (h "button" {:class "primary" :onclick (fn [_] (approve))} "Approve")
+            (h "button" {:class "ghost" :title "Reject the plan and edit it as a typed message"
+                         :onclick (fn [_] (revise plan))}
+               "Edit as text")
+            (h "button" {:class "deny" :title "Reject the plan, then record again"
+                         :onclick (fn [_] (discard))}
+               "Discard"))))))
+
+(defn- waiting-head [status]
+  (case status
+    "claimed"  "The agent is making a plan…"
+    "approved" "Approved. Waiting for the agent…"
+    "building" "The agent is working on it…"
+    "Sent. Waiting for the agent…"))
 
 (defn- steps
   "Lists the last few steps the agent reported, marking the latest as the one in progress."
@@ -218,10 +275,16 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 
 (defn- task-pill [hidden show-task]
   (h "button" {:class "pill light" :title "Show the last request" :onclick (fn [_] (show-task))}
-     (if (= :waiting hidden) (h "span" {:class "spin"}) "✓")
-     (if (= :waiting hidden) "Working…" "Last task")))
+     (case hidden
+       :waiting (h "span" {:class "spin"})
+       :review  (h "span" {:class "mark"})
+       "✓")
+     (case hidden
+       :waiting "Working…"
+       :review  "Plan ready"
+       "Last task")))
 
-(defn- view [state {:keys [start dismiss toggle-history show-task] :as actions} !ui]
+(defn- view [state {:keys [start dismiss toggle-history show-task open-chat] :as actions} !ui]
   (case (:view state)
     :idle      (h "div" {:class "bar"}
                   (when-let [hidden (and show-task (:hidden state))]
@@ -230,17 +293,23 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                     (h "button" {:class "pill light" :title "Show the commit history"
                                  :onclick (fn [_] (toggle-history))}
                        "History"))
+                  (when open-chat
+                    (h "button" {:class "pill light" :title "Type a change request"
+                                 :onclick (fn [_] (open-chat))}
+                       "Chat"))
                   (h "button" {:class "pill" :title "Record a change request" :onclick (fn [_] (start))}
                      (h "span" {:class "dot"}) "Record"))
     :starting  (spinner-pill "Starting…")
     :recording (recording-view state actions !ui)
+    :chat      (chat-view state actions !ui)
+    :review    (review-view state actions)
     :sending   (spinner-pill "Sending…")
     :waiting   (h "div" {:class "panel"}
                   (h "div" {:class "head"}
                      (h "span" {:class "spin"})
-                     (if (= "claimed" (:status state))
-                       "The agent is working on it…"
-                       "Sent. Waiting for the agent…"))
+                     (waiting-head (:status state)))
+                  (when (and (:plan state) (#{"approved" "building"} (:status state)))
+                    (h "p" {:class "note"} (:plan state)))
                   (steps (:progress state))
                   (h "div" {:class "row"}
                      (h "button" {:class "ghost" :onclick (fn [_] (dismiss))} "Hide")))
@@ -259,7 +328,8 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 (defn mount
   "Mounts the control on the document element and returns `{:host :render :destroy}`.
   `actions` is a map of `:start`, `:stop` (takes the typed note), `:cancel`, `:dismiss`,
-  `:show-task`, `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
+  `:show-task`, `:open-chat`, `:close-chat` and `:send-chat` (both take the typed text), `:approve`,
+  `:revise` (takes the text to edit), `:discard`, `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
   and `:jump` (each takes a commit hash), and `:decide` (takes a permission request id and
   \"allow\" or \"deny\")."
   [actions]
@@ -275,6 +345,8 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                 (if (and heard-only? (= :recording (:view state) (:view @!ui)))
                   (set! (.-textContent ^js (:heard-el @!ui)) (or (:heard state) ""))
                   (do (js/clearInterval (:ticker @!ui))
+                      (when (and (= :chat (:view state)) (not= :chat (:view @!ui)))
+                        (swap! !ui assoc :chat (or (:draft state) "")))
                       (swap! !ui assoc :view (:view state) :ticker nil)
                       (.replaceChildren root
                                         (h "div" {:class "stack"}
