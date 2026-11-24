@@ -136,16 +136,35 @@
                       :hasTranscript (boolean (seq transcript))
                       :hasNote (some? note))))
 
+(def ^:private data-url #"data:image/(jpeg|png);base64,([A-Za-z0-9+/=]+)")
+
+(defn- write-screenshots!
+  "Decodes the data URLs into files under screenshots/ and returns their paths relative to the session."
+  [dir urls]
+  (when (seq urls)
+    (fs/mkdirSync (path/join dir "screenshots") #js {:recursive true}))
+  (vec (map-indexed
+        (fn [i url]
+          (let [[_ type data] (when (string? url) (re-matches data-url url))
+                file          (str "screenshots/" (pad (inc i) 2) (if (= "png" type) ".png" ".jpg"))]
+            (when-not data (fail "screenshot is not a JPEG or PNG data URL" 400))
+            (fs/writeFileSync (path/join dir file) (js/Buffer.from data "base64"))
+            file))
+        urls)))
+
 (defn create-message!
-  "Stores a typed chat message as a session of kind `chat` that is ready for an agent at once."
-  [root {:keys [text] :as meta}]
+  "Stores a typed chat message, with any screenshots, as a session of kind `chat` that is
+  ready for an agent at once."
+  [root {:keys [text screenshots] :as meta}]
   (let [text (str/trim (or text ""))
         now  (js/Date.)
-        id   (new-id now)]
-    (when (str/blank? text)
+        id   (new-id now)
+        dir  (session-dir root id)]
+    (when (and (str/blank? text) (empty? screenshots))
       (fail "empty message" 400))
-    (fs/mkdirSync (session-dir root id) #js {:recursive true})
-    (fs/writeFileSync (path/join (session-dir root id) "note.txt") (str text "\n"))
+    (fs/mkdirSync dir #js {:recursive true})
+    (when (seq text)
+      (fs/writeFileSync (path/join dir "note.txt") (str text "\n")))
     (write-manifest!
      root
      {:id          id
@@ -159,7 +178,8 @@
       :userAgent   (:userAgent meta)
       :lang        (:lang meta)
       :text        text
-      :hasNote     true})))
+      :hasNote     (boolean (seq text))
+      :screenshots (write-screenshots! dir screenshots)})))
 
 (defn- transition!
   "Moves the session from status `from` to the status and fields in `changes`, or throws 409."

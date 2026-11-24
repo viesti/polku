@@ -2,6 +2,7 @@
   "Public entry point of the Polku browser client."
   (:require [clojure.string :as str]
             [polku.client.recorder :as recorder]
+            [polku.client.snap :as snap]
             [polku.client.widget :as widget]))
 
 (def ^:private pending-key "polku:pending")
@@ -180,22 +181,58 @@
     (set-state! {:view :chat :draft (or text (:draft @!state)) :chat-error nil})))
 
 (defn- close-chat!
-  "Returns to the bar and keeps the unsent text as the draft."
-  [{:keys [set-state!]} text]
-  (set-state! {:view :idle :draft text :chat-error nil}))
+  "Returns to the bar and keeps the unsent text and screenshots as the draft."
+  [{:keys [!snap set-state!]} text]
+  (snap/stop! !snap)
+  (set-state! {:view :idle :draft text :chat-error nil :preview nil}))
+
+(defn- start-drawing!
+  "Covers the page with a drawing surface for the next screenshot, keeping the typed text."
+  [{:keys [!state set-state!]} text]
+  (when (= :chat (:view @!state))
+    (set-state! {:view :drawing :draft text :chat-error nil :shot-error nil})))
+
+(defn- stop-drawing! [{:keys [!state set-state!]}]
+  (when (= :drawing (:view @!state))
+    (set-state! {:view :chat :shot-error nil})))
+
+(defn- attach-shot!
+  "Takes a screenshot of the tab with `drawing` on top and adds it to the message."
+  [{:keys [!state !snap host set-state!]} drawing]
+  (when (and (= :drawing (:view @!state)) (not (:capturing? @!state)))
+    (set-state! {:capturing? true :shot-error nil})
+    (-> (snap/capture! !snap host drawing)
+        (.then (fn [url]
+                 (let [n (inc (or (:shot-seq @!state) 0))]
+                   (set-state! {:view       :chat
+                                :capturing? false
+                                :shot-seq   n
+                                :shots      (conj (or (:shots @!state) []) {:id n :url url})}))))
+        (.catch (fn [^js err]
+                  (set-state! {:capturing? false :shot-error (.-message err)}))))))
+
+(defn- remove-shot! [{:keys [!state set-state!]} id]
+  (set-state! {:shots (vec (remove #(= id (:id %)) (:shots @!state)))}))
+
+(defn- preview-shot!
+  "Shows the screenshot `id` at full size, or closes the preview when `id` is nil."
+  [{:keys [set-state!]} id]
+  (set-state! {:preview id}))
 
 (defn- send-chat!
   "Sends the typed message to the agent, which answers with a plan to approve."
-  [{:keys [config !state set-state!] :as ctx} text]
-  (let [text (str/trim (or text ""))]
-    (when (and (seq text) (= :chat (:view @!state)))
-      (set-state! {:view :sending})
+  [{:keys [config !state !snap set-state!] :as ctx} text]
+  (let [text  (str/trim (or text ""))
+        shots (:shots @!state)]
+    (when (and (or (seq text) (seq shots)) (= :chat (:view @!state)))
+      (set-state! {:view :sending :preview nil})
       (-> (post-json (str (:endpoint config) "/messages")
-                     (assoc (page-meta) :text text :lang (:lang @!state)))
+                     (assoc (page-meta) :text text :lang (:lang @!state) :screenshots (mapv :url shots)))
           (.then (fn [{:keys [id]}]
+                   (snap/stop! !snap)
                    (remember! id)
                    (set-state! {:view :waiting :hidden nil :id id :kind "chat" :status "complete"
-                                :progress [] :plan nil :draft nil})
+                                :progress [] :plan nil :draft nil :shots []})
                    (poll! ctx id)))
           (.catch (fn [^js err]
                     (set-state! {:view       :chat
@@ -354,6 +391,7 @@
                        :!state     !state
                        :!recorder  (atom nil)
                        :!poll      (atom nil)
+                       :!snap      (atom {})
                        :set-state! (fn set-state!
                                      ([next] (set-state! next false))
                                      ([next heard-only?]
@@ -364,6 +402,11 @@
                                      :open-chat  #(open-chat! ctx nil)
                                      :close-chat #(close-chat! ctx %)
                                      :send-chat  #(send-chat! ctx %)
+                                     :start-drawing #(start-drawing! ctx %)
+                                     :stop-drawing  #(stop-drawing! ctx)
+                                     :attach-shot   #(attach-shot! (assoc ctx :host (:host @!widget)) %)
+                                     :remove-shot   #(remove-shot! ctx %)
+                                     :preview-shot  #(preview-shot! ctx %)
                                      :approve    #(answer-plan! ctx "approve" nil)
                                      :revise     #(answer-plan! ctx "reject" %)
                                      :discard    #(answer-plan! ctx "reject" nil)
@@ -385,6 +428,7 @@
                            :getState (fn [] (clj->js @!state))
                            :destroy  (fn []
                                        (cancel! ctx)
+                                       (snap/stop! (:!snap ctx))
                                        (js/clearTimeout @(:!poll ctx))
                                        ((:destroy w))
                                        (js-delete js/window "__polku"))}]

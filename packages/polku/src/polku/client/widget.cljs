@@ -75,6 +75,22 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 .plan .head::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #2563eb; flex: none; }
 .plan .msg { white-space: pre-line; }
 .pill .mark { width: 8px; height: 8px; border-radius: 50%; background: #2563eb; flex: none; }
+.stack { position: relative; z-index: 1; }
+.canvas { position: fixed; left: 0; top: 0; z-index: 0; cursor: crosshair; touch-action: none;
+  box-shadow: inset 0 0 0 3px #ef4444; }
+.shots { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.shot { position: relative; }
+.shot .thumb { display: block; width: 72px; height: 48px; padding: 0; border-radius: 6px; overflow: hidden;
+  border: 1px solid #d1d5db; background: #f3f4f6; }
+.shot .thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.shot .del { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; padding: 0;
+  font-size: 11px; line-height: 18px; background: #111827; color: #fff; }
+.preview { position: fixed; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center;
+  background: rgba(17,24,39,.82); }
+.preview img { max-width: 92vw; max-height: 88vh; border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.4);
+  background: #fff; }
+.preview .close { position: fixed; top: 16px; right: 16px; width: 36px; height: 36px; padding: 0;
+  font-size: 18px; background: #fff; color: #111827; }
 ")
 
 (defn- h
@@ -141,7 +157,76 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
           (h "button" {:class "primary" :onclick (fn [_] (stop (take-note)))} "Stop & send")
           (h "button" {:class "ghost" :onclick (fn [_] (take-note) (cancel))} "Cancel")))))
 
-(defn- chat-view [{:keys [chat-error]} {:keys [send-chat close-chat]} !ui]
+(defn- shot-list [shots {:keys [remove-shot preview-shot]}]
+  (when (seq shots)
+    (apply h "div" {:class "shots"}
+           (for [{:keys [id url]} shots]
+             (h "div" {:class "shot"}
+                (h "button" {:class "thumb" :title "Show larger" :onclick (fn [_] (preview-shot id))}
+                   (h "img" {:src url :alt "Screenshot"}))
+                (h "button" {:class "del" :title "Remove this screenshot" :onclick (fn [_] (remove-shot id))}
+                   "✕"))))))
+
+(defn- preview [{:keys [shots] :as state} {:keys [preview-shot]}]
+  (when-let [{:keys [url]} (some #(when (= (:preview state) (:id %)) %) shots)]
+    (h "div" {:class "preview" :onclick (fn [^js e]
+                                          (when (= (.-target e) (.-currentTarget e)) (preview-shot nil)))}
+       (h "img" {:src url :alt "Screenshot"})
+       (h "button" {:class "close" :title "Close" :onclick (fn [_] (preview-shot nil))} "✕"))))
+
+(defn- drawing-view [{:keys [capturing? shot-error]} {:keys [stop-drawing attach-shot]} !ui]
+  (h "div" {:class "panel"}
+     (h "div" {:class "head"} (when capturing? (h "span" {:class "spin"})) "Draw on the page")
+     (h "p" {:class "note"} "Circle or point at what you mean, then attach the screenshot.")
+     (when shot-error (h "p" {:class "msg error"} shot-error))
+     (h "div" {:class "row"}
+        (h "button" (cond-> {:class "primary" :onclick (fn [_] (attach-shot (:canvas @!ui)))}
+                      capturing? (assoc :disabled ""))
+           "Attach")
+        (h "button" {:class "ghost" :title "Erase the drawing"
+                     :onclick (fn [_]
+                                (when-let [^js c (:canvas @!ui)]
+                                  (.clearRect (.getContext c "2d") 0 0 (.-width c) (.-height c))))}
+           "Clear")
+        (h "button" {:class "ghost" :onclick (fn [_] (stop-drawing))} "Cancel"))))
+
+(defn- drawing-canvas
+  "Creates a viewport-sized canvas that the user draws on with the pointer."
+  []
+  (let [dpr       js/window.devicePixelRatio
+        w         js/window.innerWidth
+        h'        js/window.innerHeight
+        ^js c     (h "canvas" {:class "canvas" :style (str "width:" w "px;height:" h' "px")})
+        ^js ctx   (.getContext c "2d")
+        !down     (atom false)
+        point     (fn [^js e] [(.-clientX e) (.-clientY e)])]
+    (set! (.-width c) (js/Math.round (* w dpr)))
+    (set! (.-height c) (js/Math.round (* h' dpr)))
+    (.scale ctx dpr dpr)
+    (set! (.-strokeStyle ctx) "#ef4444")
+    (set! (.-lineWidth ctx) 4)
+    (set! (.-lineCap ctx) "round")
+    (set! (.-lineJoin ctx) "round")
+    (.addEventListener c "pointerdown"
+                       (fn [^js e]
+                         (.setPointerCapture c (.-pointerId e))
+                         (reset! !down true)
+                         (let [[x y] (point e)]
+                           (.beginPath ctx)
+                           (.moveTo ctx x y)
+                           (.lineTo ctx x y)
+                           (.stroke ctx))))
+    (.addEventListener c "pointermove"
+                       (fn [^js e]
+                         (when @!down
+                           (let [[x y] (point e)]
+                             (.lineTo ctx x y)
+                             (.stroke ctx)))))
+    (doseq [t ["pointerup" "pointercancel"]]
+      (.addEventListener c t (fn [_] (reset! !down false))))
+    c))
+
+(defn- chat-view [{:keys [chat-error shots] :as state} {:keys [send-chat close-chat start-drawing] :as actions} !ui]
   (let [^js input (h "textarea"
                      {:placeholder "Write what you want changed"
                       :oninput     (fn [^js e] (swap! !ui assoc :chat (.-value (.-target e))))
@@ -159,10 +244,14 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
        (h "div" {:class "head"} "Message to the agent")
        (when chat-error (h "p" {:class "msg error"} chat-error))
        input
+       (shot-list shots actions)
        (h "div" {:class "row"}
           (h "button" {:class "primary" :title "Send (⌘/Ctrl + Enter)"
                        :onclick (fn [_] (send-chat (:chat @!ui)))}
              "Send")
+          (h "button" {:class "ghost" :title "Draw on the page and attach a screenshot of it"
+                       :onclick (fn [_] (start-drawing (:chat @!ui)))}
+             "Screenshot")
           (h "button" {:class "ghost" :onclick (fn [_] (close-chat (:chat @!ui)))} "Cancel")))))
 
 (defn- review-view [{:keys [plan kind text]} {:keys [approve revise discard]}]
@@ -302,6 +391,7 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
     :starting  (spinner-pill "Starting…")
     :recording (recording-view state actions !ui)
     :chat      (chat-view state actions !ui)
+    :drawing   (drawing-view state actions !ui)
     :review    (review-view state actions)
     :sending   (spinner-pill "Sending…")
     :waiting   (h "div" {:class "panel"}
@@ -329,7 +419,9 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
   "Mounts the control on the document element and returns `{:host :render :destroy}`.
   `actions` is a map of `:start`, `:stop` (takes the typed note), `:cancel`, `:dismiss`,
   `:show-task`, `:open-chat`, `:close-chat` and `:send-chat` (both take the typed text), `:approve`,
-  `:revise` (takes the text to edit), `:discard`, `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
+  `:revise` (takes the text to edit), `:discard`, `:start-drawing` (takes the typed text),
+  `:stop-drawing`, `:attach-shot` (takes the drawing canvas), `:remove-shot` and `:preview-shot`
+  (both take a screenshot id; nil closes the preview), `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
   and `:jump` (each takes a commit hash), and `:decide` (takes a permission request id and
   \"allow\" or \"deny\")."
   [actions]
@@ -347,6 +439,16 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                   (do (js/clearInterval (:ticker @!ui))
                       (when (and (= :chat (:view state)) (not= :chat (:view @!ui)))
                         (swap! !ui assoc :chat (or (:draft state) "")))
+                      ;; The canvas sits outside `root`, so a redraw keeps the drawing
+                      (cond
+                        (and (= :drawing (:view state)) (not (:canvas @!ui)))
+                        (let [c (drawing-canvas)]
+                          (.prepend shadow c)
+                          (swap! !ui assoc :canvas c))
+
+                        (and (not= :drawing (:view state)) (:canvas @!ui))
+                        (do (.remove ^js (:canvas @!ui))
+                            (swap! !ui assoc :canvas nil)))
                       (swap! !ui assoc :view (:view state) :ticker nil)
                       (.replaceChildren root
                                         (h "div" {:class "stack"}
@@ -355,7 +457,8 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                                            (when (and (get-in state [:history :open?])
                                                       (not (#{:recording :starting} (:view state))))
                                              (history-panel (:history state) actions))
-                                           (view state actions !ui)))
+                                           (view state actions !ui))
+                                        (or (preview state actions) ""))
                       (when (= :recording (:view state))
                         (swap! !ui assoc :ticker
                                (js/setInterval

@@ -47,7 +47,8 @@
    (tool "get_session_recording"
          (str "Returns screen frames from a session as images, each labelled with its offset. "
               "Frames are sampled evenly across the requested range and always include the last one. "
-              "Narrow the range with from_ms and to_ms to look closely at one moment.")
+              "Narrow the range with from_ms and to_ms to look closely at one moment. "
+              "For a typed chat message, returns the screenshots the user attached.")
          (merge {:session_id session-id-prop
                  :max_frames {:type        "integer"
                               :minimum     1
@@ -103,10 +104,23 @@
 (defn- context-summary [root {:keys [session_id]}]
   [(text (summary/build-summary root (resolve-id root session_id)))])
 
-(defn- session-recording [root {:keys [session_id max_frames] :as args}]
-  (let [id       (resolve-id root session_id)
-        m        (store/read-manifest root id)
-        all      (store/list-frames root id)
+(defn- chat-screenshots
+  "Returns a chat message's screenshots as images."
+  [root id m]
+  (let [dir (store/session-dir root id)]
+    (into [(text (str "Message " id " has " (count (:screenshots m)) " screenshots and no recording. "
+                      "The red strokes were drawn by the user to mark what the message is about."))]
+          (mapcat (fn [f]
+                    [(text (path/relative (js/process.cwd) (path/join dir f)))
+                     {:type     "image"
+                      :data     (.toString (fs/readFileSync (path/join dir f)) "base64")
+                      :mimeType (if (str/ends-with? f ".png") "image/png" "image/jpeg")}]))
+          (:screenshots m))))
+
+(defn- frame-images
+  "Returns a recording's screen frames as images, sampled from the requested range."
+  [root id m {:keys [max_frames] :as args}]
+  (let [all      (store/list-frames root id)
         in-range (filterv #(in-range? args (:t %)) all)
         frames   (sample in-range (min max-frames (or max_frames default-frames)))
         vp       (:viewport m)]
@@ -126,6 +140,13 @@
                       :data     (.toString (fs/readFileSync file) "base64")
                       :mimeType "image/jpeg"}]))
           frames)))
+
+(defn- session-recording [root {:keys [session_id] :as args}]
+  (let [id (resolve-id root session_id)
+        m  (store/read-manifest root id)]
+    (if (= "chat" (:kind m))
+      (chat-screenshots root id m)
+      (frame-images root id m args))))
 
 (defn- interaction-events [root {:keys [session_id types limit] :as args}]
   (let [id      (resolve-id root session_id)

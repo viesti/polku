@@ -44,23 +44,39 @@
                                  (when new? (str " — frame " (rel (:file frame))))))))))))
 
 (defn- chat-summary
-  "Describes a typed chat message, which has no recording behind it."
+  "Describes a typed chat message, which has no recording behind it but may carry screenshots."
   [root id m]
-  (str/join
-   "\n"
-   [(str "# Polku message " id)
-    ""
-    (str "- Page: " (or (:url m) "unknown") (when (seq (:title m)) (str " (\"" (:title m) "\")")))
-    (str "- Sent: " (:createdAt m))
-    (str "- Session directory: "
-         (or (not-empty (path/relative (js/process.cwd) (store/session-dir root id))) "."))
-    ""
-    "## What the user asked for"
-    ""
-    "The user typed this message in the widget. There is no recording, so there are no frames, speech or timeline."
-    ""
-    (str "> " (str/replace (:text m) "\n" "\n> "))
-    ""]))
+  (let [dir   (store/session-dir root id)
+        rel   (fn [file] (or (not-empty (path/relative (js/process.cwd) file)) "."))
+        shots (:screenshots m)]
+    (str/join
+     "\n"
+     (concat
+      [(str "# Polku message " id)
+       ""
+       (str "- Page: " (or (:url m) "unknown") (when (seq (:title m)) (str " (\"" (:title m) "\")")))]
+      (when-let [vp (:viewport m)]
+        [(str "- Viewport: " (:w vp) "x" (:h vp) " CSS pixels")])
+      [(str "- Sent: " (:createdAt m))
+       (str "- Session directory: " (rel dir))
+       ""
+       "## What the user asked for"
+       ""
+       (str "The user typed this message in the widget. There is no recording, so there is no speech or timeline"
+            (if (seq shots) "." ", and no screenshot was attached."))
+       ""]
+      (if (seq (:text m))
+        [(str "> " (str/replace (:text m) "\n" "\n> ")) ""]
+        ["The message has no text, so the request is in the screenshots alone." ""])
+      (when (seq shots)
+        (concat
+         ["## Screenshots"
+          ""
+          (str "Each screenshot shows the browser tab as the user saw it. The red strokes were drawn by the user "
+               "on top of the page to point at, circle or mark what the message is about.")
+          ""]
+         (for [f shots] (str "- " (rel (path/join dir f))))
+         [""]))))))
 
 (defn- recording-summary
   "Describes a recording with what the user typed and said, a timeline, and where the artifacts are."
@@ -131,10 +147,14 @@
       (chat-summary root id m)
       (recording-summary root id m))))
 
-(defn- plan-steps [id chat?]
+(defn- plan-steps [id m]
   (concat
-   (when-not chat?
-     ["- Read the frames that matter (they are images) to see what the user was looking at and pointing to."])
+   (cond
+     (not= "chat" (:kind m))
+     ["- Read the frames that matter (they are images) to see what the user was looking at and pointing to."]
+
+     (seq (:screenshots m))
+     ["- Read every screenshot (they are images). The red strokes mark what the user means by words like \"this\" or \"here\"."])
    ["- Decide how you would do it. Read the source as much as you need, but do not change any files yet."
     (str "- Send the plan to the user's browser: `npx polku plan " id " -m \"<plan>\"`. Write two to four "
          "short sentences for a non-developer that say what will change on the page, including the choices "
@@ -178,7 +198,7 @@
                  ""
                  "Plan the change and ask the user to approve it before you change anything."
                  ""]
-                (plan-steps id (= "chat" (:kind m)))))
+                (plan-steps id m)))
       [""
        "Write plans, progress and done messages for a non-developer, in the language the user spoke or typed in."
        ""]))))

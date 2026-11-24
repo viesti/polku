@@ -19,6 +19,16 @@ A session keeps the existing pipeline. `polku wait` claims it, `polku progress` 
 
 A chat message is not a transcript. It has no recording start, so it has no time offsets, no `events.jsonl` and no frames. The manifest stores the text in `text`, the text is also written to `note.txt`, and the session starts with status `complete`. The brief for a chat message holds only the page address and the text, and says that there are no frames or timeline to look at. Faking a transcript (one `note` event at offset 0) would have produced a brief with an empty timeline and a missing frames directory, which invites the agent to look for material that does not exist.
 
+## Screenshots
+
+A chat message can carry screenshots with the user's drawing on them, since a typed "this" or "here" otherwise has nothing to point at.
+
+The Screenshot button covers the viewport with a canvas inside the widget's shadow root, and the user draws on it with the pointer. Attach takes one frame of the tab with `getDisplayMedia` (with `preferCurrentTab`), hides the widget while the frame is taken, and draws the canvas onto the frame. Drawing the strokes onto the captured frame, rather than capturing them as part of the page, keeps them exact even when the video frame lags the screen by a moment.
+
+A DOM-to-canvas renderer would avoid the permission prompt, but it renders many pages inaccurately and would add the first runtime dependency to the package. Tab capture shows the pixels the user saw. The sharing stays open while the chat panel is open, so only the first screenshot of a message asks for permission.
+
+The widget sends the screenshots as JPEG data URLs (at most 1600 pixels wide) in the `screenshots` field of `POST /messages`. The server writes them to screenshots/01.jpg and onward in the session directory and lists them in the manifest. A message may consist of screenshots alone.
+
 ## Statuses
 
 | Status | Set by | Meaning |
@@ -42,4 +52,4 @@ A chat message's plan has an Edit message button. It rejects the plan and reopen
 
 A recording's plan has two buttons. Discard rejects the plan and returns to the bar, and the person records again, since a speech transcript is hard to correct by editing. Edit as text rejects the plan and opens the text field with the plan's text, so the person can correct the agent's own summary and send it as a chat message.
 
-Both reject paths create a new session for the corrected request rather than reopening the old one. The rejected session stays on disk with status `rejected`.
+Both reject paths create a new session for the corrected request rather than reopening the old one. The rejected session stays on disk with status `rejected`. Screenshots of a rejected chat message are not brought back into the text field, so the user takes them again if they are still needed.
