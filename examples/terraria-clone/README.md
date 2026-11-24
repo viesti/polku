@@ -8,14 +8,14 @@ A coding agent built it in the demo app from requests recorded with the Polku wi
 
 ## Run it
 
-Requirements: Node 20+, a JDK, the Clojure CLI, Docker and Chrome. From this directory:
+Requirements: Node 20+, a JDK, the Clojure CLI and Chrome. From this directory:
 
 ```sh
 npm install          # also builds packages/polku, which the app links
-npm run dev          # PostgreSQL, backend + nREPL, shadow-cljs, Tailwind, polku server
+npm run dev          # backend + nREPL, shadow-cljs, Tailwind, polku server
 ```
 
-The app opens at http://localhost:3000. It uses the same ports as the demo and the other examples (3000, 4777 and 5433), so run one at a time. Each one has its own database.
+The app opens at http://localhost:3000. It uses the same ports as the demo and the other examples (3000 and 4777), so run one at a time. Saved games live in the browser's localStorage.
 
 ## Keep changing it
 

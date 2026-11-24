@@ -20,18 +20,9 @@
   :started)
 
 (defn reset
-  "Stops the system, reloads changed namespaces with clj-reload and starts it again.
-  `demo.db` is loaded again first, because clj-reload does not track the SQL file it reads
-  and a changed namespace may already call a query that was just added."
+  "Stops the system, reloads changed namespaces with clj-reload and starts it again."
   []
   (halt)
-  (when (find-ns 'demo.db)
-    (require 'demo.db :reload))
   (let [{:keys [loaded]} (reload/reload)]
     (go)
     {:reloaded loaded}))
-
-(defn migrate
-  "Applies pending migrations to the running system's database."
-  []
-  ((requiring-resolve 'demo.migrations/migrate!) (:demo/db system)))

@@ -1,11 +1,7 @@
 {:paths ["src/clj" "resources"]
  :deps  {integrant/integrant                    {:mvn/version "1.0.1"}
          metosin/reitit                         {:mvn/version "0.11.0"}
-         ring/ring-jetty-adapter                {:mvn/version "1.15.6"}
-         com.github.seancorfield/next.jdbc      {:mvn/version "1.4.72"}
-         com.layerware/hugsql-core              {:mvn/version "0.5.3"}
-         com.layerware/hugsql-adapter-next-jdbc {:mvn/version "0.5.3"}
-         org.postgresql/postgresql              {:mvn/version "42.7.7"}}
+         ring/ring-jetty-adapter                {:mvn/version "1.15.6"}}
  :aliases
  {:dev {:extra-paths ["dev"]
         :main-opts   ["-m" "dev"]

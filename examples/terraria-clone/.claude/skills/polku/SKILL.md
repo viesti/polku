@@ -50,7 +50,7 @@ The user watches the page while you work, and early in a request the page often 
 - Report a decision as soon as you make it, if it changes what the user will see ("Slimes appear only deep in the caves, so the surface stays safe").
 - When you are about to write a status line in this terminal, check whether it would interest the user. If it would, send it with `npx polku progress` as well. The user does not see this terminal.
 - Do not report problems in your own work, such as compile errors, a crash you caused, a failed check or a retry. The user sees only what is being built. If fixing takes a while, describe the part you are finishing ("Finishing the slimes' movement").
-- Write for the person, not a developer: "Saving orders to the database" rather than "Adding migration 002-orders.sql". One short sentence, no file names.
+- Write for the person, not a developer: "Saving the game in the browser" rather than "Adding a localStorage key in game.cljs". One short sentence, no file names.
 - Several edits towards one goal share a step. Do not report every file edit.
 - Write plans, progress and done messages in the language the user spoke or typed in.
 

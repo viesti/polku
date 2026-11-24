@@ -10,7 +10,6 @@
       "Bash(sleep *)",
       "Bash(grep *)",
       "Bash(tail *)",
-      "Bash(bin/db *)",
       "mcp__polku",
       "mcp__chrome-devtools"
     ]
