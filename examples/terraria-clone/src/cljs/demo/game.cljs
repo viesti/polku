@@ -2035,7 +2035,9 @@
 (def alien-w 24)
 (def alien-h 20)
 (def alien-count 10)
-(def alien-hp 3)
+;; each new alien takes a random number of pickaxe hits in this range
+(def alien-hp-min 10)
+(def alien-hp-max 15)
 (def alien-reward 8)
 (def alien-sight 450)
 (def star-count 30)
@@ -2088,7 +2090,8 @@
           py (+ (:y player) (/ player-h 2))
           aliens (or aliens [])
           aliens (if-let [[x y] (and (< (count aliens) alien-count) (open-spot tiles alien-w alien-h px py 600))]
-                   (conj aliens {:x x :y y :vx 0 :vy 0 :hp alien-hp :flash 0 :phase (* 6 (js/Math.random))})
+                   (let [hp (+ alien-hp-min (rand-int (inc (- alien-hp-max alien-hp-min))))]
+                     (conj aliens {:x x :y y :vx 0 :vy 0 :hp hp :max-hp hp :flash 0 :phase (* 6 (js/Math.random))}))
                    aliens)
           aliens (mapv #(step-alien % px py dt) aliens)
           new-star #(when-let [[x y] (open-spot tiles 14 14 px py 300)]
@@ -2188,10 +2191,21 @@
     (disc ctx "#ffffff" cx (+ sy 9) 5)
     (disc ctx "#1a0a33" (+ cx 1) (+ sy 9) 2.5)))
 
-(defn- draw-aliens [^js ctx aliens t cam-x cam-y]
-  (doseq [{:keys [x y flash phase]} aliens
-          :let [bob (* 2 (js/Math.sin (+ (/ t 300) phase)))]]
-    (draw-alien ctx (js/Math.round (- x cam-x)) (js/Math.round (+ (- y cam-y) bob)) flash phase t)))
+(defn- draw-aliens
+  "Draws the aliens, with a health bar over each one that has been hit. Aliens from
+  before they had more health have no :max-hp and started with 3."
+  [^js ctx aliens t cam-x cam-y]
+  (doseq [{:keys [x y flash phase hp max-hp]} aliens
+          :let [bob (* 2 (js/Math.sin (+ (/ t 300) phase)))
+                sx (js/Math.round (- x cam-x))
+                sy (js/Math.round (+ (- y cam-y) bob))
+                max-hp (or max-hp 3)]]
+    (draw-alien ctx sx sy flash phase t)
+    (when (< hp max-hp)
+      (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+      (.fillRect ctx (- sx 1) (- sy 12) (+ alien-w 2) 5)
+      (set! (.-fillStyle ctx) "#7cff9a")
+      (.fillRect ctx sx (- sy 11) (js/Math.round (* alien-w (/ (max 0 hp) max-hp))) 3))))
 
 (def tame-reach (* 8 T))
 
@@ -3148,7 +3162,7 @@
      ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")
      ($ :li "Once the Lord of Goo is beaten, drones fly over the overworld and now and then land; break a landed drone with the pickaxe and a spaceship comes down somewhere nearby")
      ($ :li "Hit the spaceship with the pickaxe to fly to outer space, where gravity is weak and you can hop between asteroids; space wraps round, so flying on past one edge brings you in over the opposite one. Hit the ship again to fly home")
-     ($ :li "Purple aliens float after you in space and hurt on touch; three pickaxe hits pop one for " alien-reward " coins. Touch the gold stars to collect them and sell them at the shop")
+     ($ :li "Purple aliens float after you in space and hurt on touch; " alien-hp-min " to " alien-hp-max " pickaxe hits pop one for " alien-reward " coins. Touch the gold stars to collect them and sell them at the shop")
      ($ :li "Once you have a star, the shop also sells things for stars: a Magic Mirror to stand on the ground (hit it with the pickaxe to take it back), Firework Rockets, a Map of Space, and an Alien Tamer that turns the nearest alien into a tame friend who follows you like a Fluffy")
      ($ :li "Find the shop on the surface and press E there to sell your finds and buy potions, rope and torches")))
 
