@@ -526,7 +526,7 @@
         n))))
 
 (declare strike-enemies stash portal-aimed? teleport gate-aimed? knock-gate strike-boss
-         strike-drone strike-alien here-ship box-aimed? fly-ship aimed-mirror take-mirror)
+         strike-drone strike-alien strike-robber here-ship box-aimed? fly-ship aimed-mirror take-mirror)
 
 (defn- swing!
   "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
@@ -555,7 +555,8 @@
       (do (swap! state knock-gate) true)
 
       (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight")))
-      (let [struck (or (strike-boss state) (strike-drone state) (strike-alien state) (strike-enemies state))
+      (let [struck (or (strike-boss state) (strike-drone state) (strike-alien state) (strike-robber state)
+                         (strike-enemies state))
             arena? (= :arena (:realm @state))
             hits (if struck
                    []
@@ -2207,6 +2208,189 @@
       (set! (.-fillStyle ctx) "#7cff9a")
       (.fillRect ctx sx (- sy 11) (js/Math.round (* alien-w (/ (max 0 hp) max-hp))) 3))))
 
+;; robbers walk the surface of the overworld and steal coins on touch
+(def robber-w 18)
+(def robber-h 38)
+(def robber-hp 10)
+(def max-robbers 1)
+(defn- robber-pause
+  "Returns how many frames pass before the next robber comes: one to two minutes."
+  []
+  (+ 3600 (rand-int 3601)))
+(def robber-sight (* 50 T))
+(def robber-flee-frames 360)
+(def robber-steal-min 10)
+(def robber-steal-max 20)
+
+(defn- spawn-robber
+  "Returns a robber standing on the surface 25 to 45 tiles to one side of `px`, or nil
+  when that spot is outside the world."
+  [^js tiles px]
+  (let [side (if (< (js/Math.random) 0.5) -1 1)
+        tx (+ (js/Math.floor (/ px T)) (* side (+ 25 (rand-int 21))))]
+    (when (< 2 tx (- W 3))
+      ;; the robber spans two columns, so it stands on the higher of the two
+      {:x (+ (* tx T) 1) :y (- (* T (min (ground-row tiles tx) (ground-row tiles (inc tx)))) robber-h 0.01)
+       :w robber-w :h robber-h :vx 0 :vy 0 :ground? false
+       :hp robber-hp :flash 0 :stolen 0 :flee 0 :knock 0
+       :dir side :turn-in (+ 60 (rand-int 120)) :walked 0})))
+
+(defn- step-robber
+  "Moves robber `r` one frame. It wanders until the player comes within `robber-sight`,
+  then walks after the player; while `:flee` counts down it runs away instead. It hops
+  over steps and walls in its way."
+  [tiles r player dt]
+  (let [;; a robber caught inside the ground rises a tile at a time until it is free
+        r (loop [r r n 0]
+            (if (and (< n H) (box-hits? tiles (:x r) (:y r) robber-w robber-h))
+              (recur (assoc r :y (- (:y r) T) :vy 0) (inc n))
+              r))
+        {:keys [x y dir flee knock turn-in ground?]} r
+        dx (- (+ (:x player) (/ player-w 2)) (+ x (/ robber-w 2)))
+        dy (- (:y player) y)
+        chase? (and (< (js/Math.abs dx) robber-sight) (< (js/Math.abs dy) (* 8 T)))
+        turn? (<= turn-in 0)
+        dir (cond (pos? flee) (if (neg? dx) 1 -1)
+                  chase? (if (neg? dx) -1 1)
+                  turn? (if (< (js/Math.random) 0.5) -1 1)
+                  :else dir)
+        speed (cond (pos? flee) 2.6 chase? 1.6 :else 0.7)
+        vx (if (pos? knock) (* (:vx r) 0.9) (* dir speed))
+        vy (min max-fall (+ (:vy r) (* gravity dt)))
+        moved (-> r
+                  (assoc :dir dir :vx vx :vy vy
+                         :flee (max 0 (- flee dt)) :knock (max 0 (- knock dt))
+                         :flash (max 0 (- (:flash r) dt))
+                         :turn-in (if turn? (+ 90 (rand-int 180)) (- turn-in dt)))
+                  (as-> s (move-x tiles s (* vx dt)))
+                  (as-> s (move-y tiles s (* vy dt)))
+                  (update :x #(max T (min (* T (- W 2)) %))))
+        blocked? (and ground? (zero? (:vx moved)) (not (zero? vx)))]
+    (cond-> (update moved :walked + (js/Math.abs (* (:vx moved) dt)))
+      blocked? (assoc :vy -7.5))))
+
+(defn- step-robbers
+  "Keeps up to `max-robbers` robbers on the overworld's surface, moves them and lets a
+  robber that touches the player steal 10 to 20 coins and run off with them. Robbers
+  far from the player wander off for good. The wait for the next robber runs only
+  while there is room for one, and starts again when one comes."
+  [{:keys [realm player robbers coins] :as st} dt]
+  (if (not= realm :overworld)
+    st
+    (let [tiles (get-in st [:worlds :overworld :tiles])
+          px (+ (:x player) (/ player-w 2))
+          room? (< (count robbers) max-robbers)
+          robber-in (cond-> (:robber-in st 0) room? (- dt))
+          new (when (and room? (<= robber-in 0))
+                (spawn-robber tiles px))
+          robber-in (if new (robber-pause) robber-in)
+          robbers (cond-> (into [] (comp (map #(step-robber tiles % player dt))
+                                         (filter #(< (js/Math.abs (- (:x %) px)) (* 80 T))))
+                                (or robbers []))
+                    new (conj new))
+          coins (or coins 0)
+          thief (some (fn [[i r]] (when (and (zero? (:flee r)) (touching? player r)) i))
+                      (map-indexed vector robbers))
+          n (min coins (+ robber-steal-min (rand-int (inc (- robber-steal-max robber-steal-min)))))]
+      (cond-> (assoc st :robbers robbers :robber-in robber-in)
+        thief
+        (assoc-in [:robbers thief :flee] robber-flee-frames)
+        (and thief (pos? n))
+        (-> (add-coins (- n))
+            (update-in [:robbers thief :stolen] + n)
+            (update :popups conj {:text (str "A robber stole " n " coins!") :icon :coin
+                                  :x px :y (- (:y player) 10) :life 120}))
+        ;; with nothing to steal the robber grumbles and runs off all the same
+        (and thief (zero? n))
+        (update :popups conj (let [r (get robbers thief)]
+                               {:text "No coins!" :x (+ (:x r) (/ robber-w 2)) :y (- (:y r) 10) :life 120}))))))
+
+(defn- strike-robber
+  "Hits the nearest robber in front of the pickaxe and within reach. Returns nil when
+  the pickaxe reaches none, `:loot` when the robber is knocked out and drops half the
+  coins it stole, and `:hit` otherwise."
+  [state]
+  (let [{:keys [player robbers realm]} @state
+        px (+ (:x player) (/ player-w 2))
+        [hx hy] (hand player)
+        [ax ay] (or (:aim-at player) [(+ hx (:facing player)) hy])
+        ad (max 0.001 (js/Math.hypot (- ax hx) (- ay hy)))
+        ;; the same reach and swing direction as `strike-enemies` uses for slimes
+        dist (fn [{:keys [x y]}]
+               (let [cx (- (+ x (/ robber-w 2)) hx)
+                     cy (- (+ y (/ robber-h 2)) hy)
+                     d (js/Math.hypot cx cy)]
+                 (when (and (<= d (+ reach 14))
+                            (or (< d 26)
+                                (> (/ (+ (* cx (- ax hx)) (* cy (- ay hy))) (* d ad)) 0.55)))
+                   d)))
+        i (when (= realm :overworld)
+            (some->> (keep-indexed (fn [i r] (when-let [d (dist r)] [d i])) robbers)
+                     seq (apply min-key first) second))]
+    (when i
+      (let [{:keys [x y hp stolen]} (get robbers i)
+            dust (fn [n] (for [k (range n)]
+                           {:x (+ x (* robber-w (js/Math.random))) :y (+ y (* robber-h (js/Math.random)))
+                            :vx (- (* 4 (js/Math.random)) 2) :vy (- (* -3 (js/Math.random)) 1)
+                            :life (+ 15 (* 20 (js/Math.random))) :color (if (even? k) "#222222" "#eeeeee") :i k}))]
+        (if (> hp 1)
+          (do (swap! state #(-> %
+                                (update-in [:robbers i] assoc :hp (dec hp) :flash 8 :knock 12
+                                           :vx (if (< (+ x (/ robber-w 2)) px) -4 4) :vy -2.5)
+                                (update :particles into (dust 5))))
+              :hit)
+          (let [back (quot stolen 2)]
+            (swap! state #(cond-> (-> %
+                                      (update :robbers (fn [rs] (into (subvec rs 0 i) (subvec rs (inc i)))))
+                                      (update :particles into (dust 18)))
+                            (pos? back)
+                            (-> (add-coins back)
+                                (update :popups conj {:text (str "+" back) :icon :coin
+                                                      :x (+ x (/ robber-w 2)) :y (- y 8) :life 90}))))
+            :loot))))))
+
+(defn- draw-robber
+  "Draws robber `r` in a black mask, a striped shirt and a beanie, carrying a coin sack
+  once it has stolen something."
+  [^js ctx {:keys [x y dir vx ground? walked flash stolen]} cam-x cam-y]
+  (let [sx (js/Math.round (- x cam-x))
+        sy (js/Math.round (- y cam-y))
+        moving? (and ground? (> (js/Math.abs vx) 0.4))
+        swing (if moving? (js/Math.round (* 3 (js/Math.sin (/ walked 6)))) 0)
+        rect (fn [color rx ry rw rh]
+               (set! (.-fillStyle ctx) (if (pos? flash) "#ffffff" color))
+               (.fillRect ctx (if (pos? dir) (+ sx rx) (- (+ sx robber-w) rx rw)) (+ sy ry) rw rh))]
+    (when (pos? stolen)
+      (rect "#a0783c" -5 14 9 11)
+      (rect "#7a5a2a" -4 12 7 3)
+      (rect "#ffd54a" -2 18 3 3))
+    (rect "#2b2b2b" 3 28 5 10)
+    (rect "#2b2b2b" 10 28 5 10)
+    (rect "#111111" (+ 3 swing) 34 5 4)
+    (rect "#111111" (- 10 swing) 34 5 4)
+    (rect "#f5f5f5" 2 15 14 14)
+    (doseq [k (range 4)] (rect "#1d1d1d" 2 (+ 16 (* 3 k)) 14 2))
+    (rect "#f1c27d" (+ 7 (- swing)) 17 4 11)
+    (rect "#f1c27d" 3 3 13 13)
+    (rect "#111111" 3 7 13 4)
+    (rect "#ffffff" 11 8 2 2)
+    (rect "#ffffff" 6 8 2 2)
+    (rect "#1d1d1d" 2 0 15 5)
+    (rect "#3a3a3a" 2 4 15 1)))
+
+(defn- draw-robbers
+  "Draws the robbers, with a health bar over each one that has been hit."
+  [^js ctx robbers cam-x cam-y]
+  (doseq [{:keys [x y hp] :as r} robbers
+          :let [sx (js/Math.round (- x cam-x))
+                sy (js/Math.round (- y cam-y))]]
+    (draw-robber ctx r cam-x cam-y)
+    (when (< hp robber-hp)
+      (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+      (.fillRect ctx (- sx 1) (- sy 10) (+ robber-w 2) 5)
+      (set! (.-fillStyle ctx) "#e53935")
+      (.fillRect ctx sx (- sy 9) (js/Math.round (* robber-w (/ (max 0 hp) robber-hp))) 3))))
+
 (def tame-reach (* 8 T))
 
 (defn- tame-alien
@@ -3055,8 +3239,10 @@
   or a torch is placed on the tile under the mouse, paint colours the Fluffy under the
   mouse, and the Dimension Amulet opens a portal when
   the player is on the surface."
-  [{:keys [player bag enemies] :as st} tiles i]
+  [{:keys [player bag enemies robbers realm] :as st} tiles i]
   (let [{:keys [id name count]} (get bag i)
+        ;; robbers walk only in the overworld, and no block may bury one there
+        enemies (cond-> (vec enemies) (= :overworld realm) (into robbers))
         spend (fn [st n] (if (< n count) (update-in st [:bag i :count] - n) (assoc-in st [:bag i] nil)))
         popup (fn [st text] (update st :popups conj {:text text :x (+ (:x player) (/ player-w 2))
                                                      :y (- (:y player) 10) :life 90}))]
@@ -3171,6 +3357,7 @@
      ($ :li "Hit the spaceship with the pickaxe to fly to outer space, where gravity is weak and you can hop between asteroids; space wraps round, so flying on past one edge brings you in over the opposite one. Hit the ship again to fly home")
      ($ :li "Purple aliens float after you in space and hurt on touch; " alien-hp-min " to " alien-hp-max " pickaxe hits pop one for " alien-reward " coins. Touch the gold stars to collect them and sell them at the shop")
      ($ :li "Once you have a star, the shop also sells things for stars: a Magic Mirror to stand on the ground (hit it with the pickaxe to take it back), Firework Rockets, a Map of Space, and an Alien Tamer that turns the nearest alien into a tame friend who follows you like a Fluffy")
+     ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off. Knock a robber out with " robber-hp " pickaxe hits to get back half of what it stole")
      ($ :li "Find the shop on the surface and press E there to sell your finds and buy potions, rope and torches")))
 
 (defn- ->b64 [^js arr]
@@ -3947,7 +4134,7 @@
                                  (flow-ooze! (:tiles world) levels @flips))
                              _ (step-enemies! state (:tiles world) (:surface world) light dt)
                              _ (step-boss! state (:tiles world) dt)
-                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt)))
+                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt)))
                              _ (set-quest! (:quest @state))
                              _ (when (and (= :slime (:realm @state)) (:gate-open? @state)
                                           (touching? player (assoc (:gate world) :w gate-w :h gate-h)))
@@ -4005,7 +4192,8 @@
                            (when-let [boss (:boss @state)] (draw-boss ctx boss t cam-x cam-y))
                            (when (home?)
                              (when-let [ship (:ship @state)] (draw-ship ctx ship t cam-x cam-y))
-                             (draw-drones ctx (:drones @state) t cam-x cam-y))
+                             (draw-drones ctx (:drones @state) t cam-x cam-y)
+                             (draw-robbers ctx (:robbers @state) cam-x cam-y))
                            (when space?
                              (draw-ship ctx (get-in @state [:worlds :space :ship]) t cam-x cam-y))
                            (draw-houses ctx (:houses @state) (:realm @state) cam-x cam-y)
