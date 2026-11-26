@@ -1,8 +1,8 @@
 # Sandbox game example
 
-A side-scrolling 2D sandbox game drawn on a canvas. The world is generated with hills, trees and caves. The player digs tiles, finds chests with loot, buys from a shop, meets slimes, and plays through a day and night cycle.
+A side-scrolling 2D sandbox game drawn on a canvas. The world is generated with hills, trees and caves. The player digs tiles, finds chests with loot, buys from shops, meets slimes, fights the Lord of Goo, and plays through a day and night cycle. Further on are the Slime Dimension, quests, Fluffies and their houses, and outer space with aliens and a star shop.
 
-Controls: A and D to run, Space to jump, and the mouse button or Shift to dig.
+Controls: A and D to run, Space or W to jump or climb a rope, S to climb down, and the mouse button or Shift to dig. E opens a shop, takes a quest or interacts with a Fluffy nearby, 1 to 0 pick a bag slot, and M opens the menu.
 
 A coding agent built it in the demo app from requests recorded with the Polku widget.
 

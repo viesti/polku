@@ -136,7 +136,6 @@
 
 (defn init []
   (when ^boolean goog.DEBUG
-    (polku/init {:endpoint  "http://localhost:4777"
-                 :lang      "en-US"
+    (polku/init {:lang      "en-US"
                  :languages ["en-US" "fi-FI"]}))
   (render))
