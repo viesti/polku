@@ -3120,12 +3120,18 @@
       id (popup st (str name " can't be used yet"))
       :else st)))
 
-(defui bag-bar [{:keys [bag]}]
+(defui bag-bar
+  "Shows the bag slots. With `on-use`, which the touch controls pass, tapping a slot
+  uses its item."
+  [{:keys [bag on-use]}]
   ($ :div {:class "flex gap-1.5 select-none"}
      (for [i (range bag-size)
            :let [{:keys [id name count]} (get bag i)]]
        ($ :div {:key i :title name
-                :class "relative flex h-11 w-11 items-center justify-center rounded-md border border-white/20 bg-black/40"}
+                :on-pointer-down (when on-use
+                                   (fn [^js e] (.preventDefault e) (on-use i)))
+                :class (str "relative flex h-11 w-11 items-center justify-center rounded-md border border-white/20 bg-black/40"
+                            (when on-use " touch-none active:bg-white/30"))}
           ($ :span {:class "absolute left-1 top-0.5 text-[10px] font-semibold text-white/70"} (mod (inc i) 10))
           (when id ($ icons/icon {:id id :size 28}))
           (when (> count 1)
@@ -3146,6 +3152,7 @@
      ($ :li "A and D move, Space jumps")
      ($ :li "The mouse aims the pickaxe")
      ($ :li "Shift or click digs or hits slimes")
+     ($ :li "On a tablet, the pad in the bottom left corner moves, jumps and climbs, a finger anywhere else aims and digs, the E button in the bottom right does what the E key does, and tapping a bag slot uses its item where you last touched")
      ($ :li "Keys 1 to 9 and 0 use the items in your bag; a Healing Potion gives +" potion-heal " health")
      ($ :li "The bag has " bag-size " slots, each holding a stack of one kind of item; when it is full, new finds are lost")
      ($ :li "Rope hangs down from where the mouse points, one rope per block; jump into it to grab it")
@@ -3703,6 +3710,63 @@
                                :on-click #(do (.blur (.-currentTarget %)) (on-sell id count))}
                       "All")))))))))
 
+(def ^:private pad-dead-zone
+  "How far in CSS pixels the thumb must move from the centre of the touch pad before a
+  direction counts."
+  22)
+
+(defn- pad-keys
+  "Returns the movement keys that a thumb at `dx`, `dy` from the centre of the touch
+  pad holds down: left and right move, up jumps, climbs and swims, down climbs down."
+  [dx dy]
+  (cond-> #{}
+    (< dx (- pad-dead-zone)) (conj "KeyA")
+    (> dx pad-dead-zone) (conj "KeyD")
+    (< dy (- pad-dead-zone)) (conj "Space")
+    (> dy pad-dead-zone) (conj "KeyS")))
+
+(defui touch-pad
+  "A pad for the left thumb that holds down the movement keys in the game state held
+  by `state-ref`. Sliding the thumb across the pad changes direction without lifting it."
+  [{:keys [state-ref]}]
+  (let [held (use-ref #{})
+        [shown set-shown!] (use-state #{})
+        hold! (fn [ks]
+                (when-let [state @state-ref]
+                  (swap! state update :keys #(into (reduce disj % @held) ks)))
+                (reset! held ks)
+                (set-shown! ks))
+        aim! (fn [^js e]
+               (let [r (.getBoundingClientRect (.-currentTarget e))]
+                 (hold! (pad-keys (- (.-clientX e) (+ (.-left r) (/ (.-width r) 2)))
+                                  (- (.-clientY e) (+ (.-top r) (/ (.-height r) 2)))))))
+        arrow (fn [k label pos]
+                ($ :span {:class (str "absolute flex h-14 w-14 items-center justify-center rounded-full text-2xl "
+                                      pos (if (shown k) " bg-white/50 text-black" " bg-white/15 text-white/80"))}
+                   label))]
+    ($ :div {:class "absolute bottom-6 left-6 h-44 w-44 touch-none select-none rounded-full border-2 border-white/25 bg-black/30"
+             :on-pointer-down (fn [^js e]
+                                (.preventDefault e)
+                                (.setPointerCapture (.-currentTarget e) (.-pointerId e))
+                                (aim! e))
+             :on-pointer-move (fn [^js e]
+                                (when (.hasPointerCapture (.-currentTarget e) (.-pointerId e))
+                                  (aim! e)))
+             :on-pointer-up #(hold! #{})
+             :on-pointer-cancel #(hold! #{})}
+       (arrow "Space" "▲" "left-1/2 top-1 -translate-x-1/2")
+       (arrow "KeyS" "▼" "left-1/2 bottom-1 -translate-x-1/2")
+       ;; U+FE0E keeps the side arrows as plain text instead of emoji
+       (arrow "KeyA" "◀︎" "left-1 top-1/2 -translate-y-1/2")
+       (arrow "KeyD" "▶︎" "right-1 top-1/2 -translate-y-1/2"))))
+
+(defui touch-e-button
+  "A big E button for the right thumb that does what the E key does."
+  [{:keys [on-press]}]
+  ($ :button {:class "absolute bottom-10 right-8 h-24 w-24 touch-none select-none rounded-full border-2 border-white/30 bg-black/40 text-4xl font-bold text-white active:bg-white/40"
+              :on-pointer-down (fn [^js e] (.preventDefault e) (on-press))}
+     "E"))
+
 (defui game []
   (let [canvas-ref (use-ref nil)
         state-ref (use-ref nil)
@@ -3718,6 +3782,16 @@
         [star-shop? set-star-shop!] (use-state false)
         [space-map? set-space-map!] (use-state false)
         [in-space? set-in-space!] (use-state false)
+        ;; the touch controls show from the first touch on
+        [touch? set-touch!] (use-state false)
+        on-press-e (fn []
+                     (when-let [state @state-ref]
+                       (when-not (:paused? @state)
+                         (swap! state #(or (toggle-shop %) (accept-quest %) (toggle-fluffy %))))))
+        on-use-slot (fn [i]
+                      (when-let [state @state-ref]
+                        (when-not (:paused? @state)
+                          (swap! state use-slot (get-in @state [:worlds (:realm @state) :tiles]) i))))
         sync! (fn [st]
                 (set-coins! (:coins st 0))
                 (set-bag! (:bag st)))
@@ -3780,12 +3854,42 @@
                              (swap! state update :keys conj (.-code e))))))
              on-up (fn [^js e] (swap! state update :keys disj (.-code e)))
              on-blur (fn [] (swap! state assoc :keys #{} :mouse-down? false))
-             on-move (fn [^js e] (swap! state assoc :mouse [(.-clientX e) (.-clientY e)]))
+             ;; browsers follow a tap with made-up mouse events at the tapped spot, which
+             ;; would move the aim onto the touch buttons, so mouse events soon after a
+             ;; touch are ignored
+             last-touch (atom -1e9)
+             touched-lately? #(< (- (js/performance.now) @last-touch) 1000)
+             on-any-touch (fn [] (reset! last-touch (js/performance.now)) (set-touch! true))
+             on-move (fn [^js e]
+                       (when-not (touched-lately?)
+                         (swap! state assoc :mouse [(.-clientX e) (.-clientY e)])))
              on-press (fn [^js e]
-                        (when (zero? (.-button e))
+                        (when (and (zero? (.-button e)) (not (touched-lately?)))
                           (swap! state assoc :mouse-down? true
                                  :mouse [(.-clientX e) (.-clientY e)])))
-             on-release (fn [] (swap! state assoc :mouse-down? false))
+             on-release (fn [] (when-not (touched-lately?) (swap! state assoc :mouse-down? false)))
+             ;; one finger on the canvas aims and digs like the mouse
+             aim-touch (atom nil)
+             find-touch (fn [^js e]
+                          (some #(when (= @aim-touch (.-identifier %)) %)
+                                (array-seq (.-changedTouches e))))
+             on-touch-start (fn [^js e]
+                              (.preventDefault e)
+                              (on-any-touch)
+                              (when (nil? @aim-touch)
+                                (let [^js t (aget (.-changedTouches e) 0)]
+                                  (reset! aim-touch (.-identifier t))
+                                  (swap! state assoc :mouse-down? true
+                                         :mouse [(.-clientX t) (.-clientY t)]))))
+             on-touch-move (fn [^js e]
+                             (.preventDefault e)
+                             (when-let [^js t (find-touch e)]
+                               (swap! state assoc :mouse [(.-clientX t) (.-clientY t)])))
+             on-touch-end (fn [^js e]
+                            (on-any-touch)
+                            (when (find-touch e)
+                              (reset! aim-touch nil)
+                              (swap! state assoc :mouse-down? false)))
              frame (fn frame [t]
                      (if (:paused? @state)
                                    ;; the canvas keeps the last picture and the clock stands still
@@ -3943,6 +4047,12 @@
          (.addEventListener js/window "mousemove" on-move)
          (.addEventListener canvas "mousedown" on-press)
          (.addEventListener js/window "mouseup" on-release)
+         (.addEventListener js/window "touchstart" on-any-touch #js {:passive true})
+         (.addEventListener js/window "touchend" on-any-touch #js {:passive true})
+         (.addEventListener canvas "touchstart" on-touch-start #js {:passive false})
+         (.addEventListener canvas "touchmove" on-touch-move #js {:passive false})
+         (.addEventListener canvas "touchend" on-touch-end)
+         (.addEventListener canvas "touchcancel" on-touch-end)
          (reset! raf (js/requestAnimationFrame frame))
          (fn []
            (js/cancelAnimationFrame @raf)
@@ -3952,12 +4062,18 @@
            (.removeEventListener js/window "blur" on-blur)
            (.removeEventListener js/window "mousemove" on-move)
            (.removeEventListener canvas "mousedown" on-press)
-           (.removeEventListener js/window "mouseup" on-release))))
+           (.removeEventListener js/window "mouseup" on-release)
+           (.removeEventListener js/window "touchstart" on-any-touch)
+           (.removeEventListener js/window "touchend" on-any-touch)
+           (.removeEventListener canvas "touchstart" on-touch-start)
+           (.removeEventListener canvas "touchmove" on-touch-move)
+           (.removeEventListener canvas "touchend" on-touch-end)
+           (.removeEventListener canvas "touchcancel" on-touch-end))))
      [])
     ($ :div {:class "fixed inset-0 overflow-hidden bg-sky-300"}
-       ($ :canvas {:ref canvas-ref :class "block w-full h-full [image-rendering:pixelated]"})
+       ($ :canvas {:ref canvas-ref :class "block w-full h-full touch-none [image-rendering:pixelated]"})
        ($ :div {:class "absolute top-4 left-4 flex flex-col gap-2"}
-          ($ bag-bar {:bag bag})
+          ($ bag-bar {:bag bag :on-use (when touch? on-use-slot)})
           ($ health-bar {:hp hp})
           ($ quest-panel {:quest quest}))
        ($ coin-panel {:coins coins :on-menu #(set-menu! not)
@@ -3973,6 +4089,10 @@
               ($ mini-map {:state-ref state-ref}))))
        (when boss-hp
          ($ boss-bar {:hp boss-hp}))
+       (when touch?
+         ($ :<>
+            ($ touch-pad {:state-ref state-ref})
+            ($ touch-e-button {:on-press on-press-e})))
        (when at-shop?
          ($ shop-panel {:coins coins :bag bag :on-sell on-sell :on-buy on-buy
                         :map? map? :on-buy-map on-buy-map
