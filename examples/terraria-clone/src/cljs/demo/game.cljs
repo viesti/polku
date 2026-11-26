@@ -1535,7 +1535,7 @@
      :vx 0 :vy 0 :facing 1 :walked 0 :ground? false :swing 0 :hp max-hp}))
 
 (def buy-prices
-  {:potion 10 :rope 5 :torch 5 :house 30 :paint-red 10 :paint-yellow 10 :paint-blue 10})
+  {:potion 10 :rope 5 :torch 5 :house 50 :paint-red 10 :paint-yellow 10 :paint-blue 10})
 
 (def buy-amounts
   {:potion 1 :rope 5 :torch 1 :house 1 :paint-red 1 :paint-yellow 1 :paint-blue 1})
