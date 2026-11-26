@@ -1,6 +1,6 @@
 # Sandbox game example
 
-This app is a side-scrolling 2D sandbox game with digging, caves, chests, a shop, slimes and a day and night cycle. It was built from requests recorded with the Polku widget, and a person can keep describing changes there for you to make. Run the `/polku` skill to start waiting for their requests.
+This app is a side-scrolling 2D sandbox game with digging, caves, chests, shops, slimes, a boss arena, quests, a day and night cycle and outer space with aliens. It was built from requests recorded with the Polku widget, and a person can keep describing changes there for you to make. Run the `/polku` skill to start waiting for their requests.
 
 The person watches the browser at http://localhost:3000. Every change has to reach that page through live reload, without restarting the dev processes.
 

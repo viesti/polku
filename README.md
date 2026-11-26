@@ -87,7 +87,7 @@ The examples directory holds apps that an agent built from the blank demo throug
 | Example | What it is |
 | --- | --- |
 | [mood-game](examples/mood-game) | A small game in which everyday activities change a character's mood |
-| [terraria-clone](examples/terraria-clone) | A side-scrolling 2D sandbox game with digging, caves, chests, a shop and slimes |
+| [terraria-clone](examples/terraria-clone) | A side-scrolling 2D sandbox game with digging, caves, shops, slimes, a boss arena and outer space with aliens |
 | [shopping-list](examples/shopping-list) | Shopping lists with icons per item, stored in PostgreSQL |
 
 Run an example the same way as the demo, from its own directory. They all use ports 3000, 4777 and 5433, so run one at a time.
@@ -107,7 +107,7 @@ JavaScript:
 ```js
 import { init } from 'polku';
 
-if (import.meta.env.DEV) init({ endpoint: 'http://localhost:4777' });
+if (import.meta.env.DEV) init();
 ```
 
 ClojureScript (with `packages/polku/src` on the source path, or the package as a `deps.edn` dependency):
@@ -116,12 +116,35 @@ ClojureScript (with `packages/polku/src` on the source path, or the package as a
 (ns app.core (:require [polku.client.core :as polku]))
 
 (when ^boolean goog.DEBUG
-  (polku/init {:endpoint "http://localhost:4777"}))
+  (polku/init {}))
 ```
 
-Options: `endpoint` (defaults to port 4777 on the host and protocol that served the page), `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language), `languages` (the speech languages offered in the widget, defaults to `lang` followed by the browser's preferred languages) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `setLang(tag)`, `getState` and `destroy`.
+Options: `endpoint` (defaults to port 4777 on the host and protocol that served the page, so a page opened from another machine reaches the server running next to the app), `screen` and `audio` (both default to true), `lang` (speech recognition language, defaults to the browser language), `languages` (the speech languages offered in the widget, defaults to `lang` followed by the browser's preferred languages) and `frameInterval` (milliseconds between frame checks, default 2000). `init` returns a controller with `start`, `stop(note)`, `cancel`, `dismiss`, `setLang(tag)`, `getState` and `destroy`.
 
 The Web Speech API recognizes one language at a time and cannot detect it. In browsers that have `SpeechRecognition.available()`, the widget drops the languages it reports as unavailable. When more than one language remains, the recording panel shows a language selector. Switching restarts recognition in the new language, and the widget remembers the choice in localStorage for later recordings. Each speech event records the language it was recognized in, and the brief names it.
+
+### Commit history
+
+The History button next to Record lists recent commits from HEAD and the main branch. Clicking a subject shows the commit's hash, author, date and body. Jump creates a `history-<hash>` branch at that commit and switches the working tree to it, so the app live-reloads into the earlier version. Back to main switches back. Uncommitted changes come along when git can carry them. The server reads the history with `GET /git/log` and switches branches with `POST /git/jump` and `POST /git/main`.
+
+### Approving permission requests in the browser
+
+The person in the browser cannot see the agent's terminal, so a permission prompt there stalls the loop. `polku permission-hook` is a Claude Code `PermissionRequest` hook that shows the request in the widget with Allow and Deny buttons and passes the answer back to the agent. If the server is unreachable or nobody answers within `--timeout` seconds (default 300), the agent falls back to its own terminal prompt. `polku init` does not install the hook, so add it to the project's .claude/settings.json:
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "npx polku permission-hook", "timeout": 310 }]
+      }
+    ]
+  }
+}
+```
+
+The hook's own `timeout` is longer than the command's, so Claude Code does not cancel it while the person is still deciding.
 
 ## CLI
 
@@ -129,6 +152,7 @@ The Web Speech API recognizes one language at a time and cannot detect it. In br
 polku serve [--port 4777] [--host <addr>] [--origin <url>]
                                              start the ingest server
 polku wait [--timeout <s>]                   block until a session is ready, print its brief
+                                             (exits with code 2 on timeout)
 polku watch -- <cmd...>                      run <cmd> with the brief on stdin for each claimed session
 polku plan [id] -m <text>                    show the plan in the user's browser for approval
 polku progress [id] -m <text>                show the step the agent is on in the user's browser
@@ -136,9 +160,13 @@ polku done [id] -m <text>                    finish a session and message the us
 polku summary [id]                           print a session's brief
 polku events [id] [--type <t>]               print raw events as JSON lines
 polku list                                   list sessions
+polku permission-hook [--port 4777] [--timeout 300]
+                                             Claude Code PermissionRequest hook answered in the widget
 polku mcp                                    serve sessions as MCP tools over stdio
 polku init                                   install the Claude Code skill and the MCP server entry
 ```
+
+The commands that work with sessions take `--dir <path>` to use another workspace directory than .polku. `polku serve` also reads `POLKU_HOST` (the listen address) and `POLKU_ORIGIN` (extra allowed origins, separated by commas). The CLI commands always reach the server at 127.0.0.1.
 
 ## MCP tools
 
