@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "postinstall": "npm --prefix ../../packages/polku install && npm --prefix ../../packages/polku run build",
-    "cljs": "shadow-cljs watch app",
+    "cljs": "bin/shadow-watch",
     "css": "tailwindcss -i src/css/app.css -o resources/public/css/app.css --watch=always",
     "api": "clojure -M:dev",
     "polku": "polku serve",

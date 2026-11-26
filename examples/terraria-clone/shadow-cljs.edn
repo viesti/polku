@@ -11,6 +11,9 @@
    :output-dir "resources/public/js"
    :asset-path "/js"
    :modules    {:main {:init-fn demo.app/init}}
-   ;; Live reload connects to port 9630 on the page's host, over wss when the page is https
+   ;; Behind a reverse proxy that forwards a path to port 4777, such as "/polku"
+   :closure-defines {demo.app/polku-endpoint #shadow/env ["POLKU_ENDPOINT" ""]}
+   ;; Live reload connects to port 9630 on the page's host, over wss when the page is https.
+   ;; bin/shadow-watch replaces that address with SHADOW_DEVTOOLS_URL when it is set
    :devtools   {:watch-dir             "resources/public"
                 :use-document-protocol true}}}}

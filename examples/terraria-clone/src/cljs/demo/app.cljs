@@ -8,6 +8,9 @@
   ($ :main
      ($ game/game)))
 
+;; Polku server URL, set from POLKU_ENDPOINT in shadow-cljs.edn. Empty means port 4777 on the page's host
+(goog-define polku-endpoint "")
+
 (defonce root
   (uix.dom/create-root (js/document.getElementById "app")))
 
@@ -16,6 +19,7 @@
 
 (defn init []
   (when ^boolean goog.DEBUG
-    (polku/init {:lang      "en-US"
-                 :languages ["en-US" "fi-FI"]}))
+    (polku/init (cond-> {:lang      "en-US"
+                         :languages ["en-US" "fi-FI"]}
+                  (seq polku-endpoint) (assoc :endpoint polku-endpoint))))
   (render))

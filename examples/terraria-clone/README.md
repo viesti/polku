@@ -40,6 +40,14 @@ POLKU_HOST=0.0.0.0 POLKU_ORIGIN=http://<server>:3000 npm run dev
 
 For recording, list `http://<server>:3000` under `chrome://flags/#unsafely-treat-insecure-origin-as-secure` in the browser you use. Anyone on the network can then send requests to the Polku server, which the agent acts on, so do this only on a network you trust.
 
+**Behind a reverse proxy on one HTTPS name.** When the proxy forwards `/polku/*` to port 4777 and `/shadow/*` to port 9630 (removing the prefix), and everything else to port 3000, start with
+
+```sh
+POLKU_ENDPOINT=/polku SHADOW_DEVTOOLS_URL=https://<host>/shadow POLKU_ORIGIN=https://<host> npm run dev
+```
+
+`POLKU_ENDPOINT` sets the address the widget sends to, and bin/shadow-watch passes `SHADOW_DEVTOOLS_URL` to shadow-cljs as the live reload address. Without `POLKU_ORIGIN`, the Polku server answers the widget's requests with 403. All three are read when `npm run dev` starts, so restart it to change them.
+
 ## Keep changing it
 
 Start the agent in a second terminal with `npm run agent`, press Record in the page and describe the next change. The [demo README](../../demo/README.md) explains recording in more detail.
