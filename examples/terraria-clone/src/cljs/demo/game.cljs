@@ -3594,7 +3594,7 @@
        (when (seen :paper)
          ($ help-section {:title "The newspaper"}
             ($ :li "Every morning a paperboy in a red cap walks the surface; press E next to him to buy The Mine Valley Times for " paper-price " coins")
-            ($ :li "The paper tells what you got up to the day before; once bought, press E next to him to read it again")))
+            ($ :li "The paper tells what you got up to the day before; once bought, the newspaper button in the bottom right corner opens it again")))
        (when (seen :robbers)
          ($ help-section {:title "Robbers"}
             ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
@@ -4440,6 +4440,8 @@
         [in-space? set-in-space!] (use-state false)
         ;; the newspaper the player is reading, if any
         [paper set-paper!] (use-state nil)
+        ;; the day of the last paper bought, which a button opens again
+        [paper-day set-paper-day!] (use-state nil)
         ;; the touch controls show from the first touch on
         [touch? set-touch!] (use-state false)
         on-press-e (fn []
@@ -4637,6 +4639,7 @@
                              _ (set-space-map! (boolean (:space-map? @state)))
                              _ (set-in-space! space?)
                              _ (set-paper! (when (:paper-open? @state) (:paper @state)))
+                             _ (set-paper-day! (get-in @state [:paper :day]))
                              _ (set-star-shop! (boolean (or (:star-shop? @state)
                                                             (pos? (star-count-in (:bag @state))))))
                              _ (set-hp! (/ (js/Math.floor (* 10 (get-in @state [:player :hp]))) 10))
@@ -4761,6 +4764,16 @@
                         :map? map? :on-buy-map on-buy-map
                         :star-shop? star-shop? :on-buy-star on-buy-star
                         :space-map? space-map? :on-buy-space-map on-buy-space-map}))
+       ;; the last paper bought opens again from here, anywhere and for free; the button
+       ;; stays above the Polku widget and the tablet E button
+       (when (and paper-day (not paper))
+         ($ :button {:class (str "absolute right-4 flex items-center gap-2 rounded-md border border-stone-400 bg-[#f4ecd8] px-3 py-1.5 font-serif text-sm font-bold text-stone-900 shadow-lg select-none hover:bg-white "
+                                 (if touch? "bottom-40" "bottom-20"))
+                     :title "Read the last newspaper you bought"
+                     :on-click #(do (.blur (.-currentTarget %))
+                                    (some-> @state-ref (swap! assoc :paper-open? true)))}
+            ($ :span {:class "text-base leading-none"} "📰")
+            (str "The Times · Day " paper-day)))
        (when paper
          ($ newspaper-panel {:paper paper
                              :on-close #(some-> @state-ref (swap! assoc :paper-open? false))}))
