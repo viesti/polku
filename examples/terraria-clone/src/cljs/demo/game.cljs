@@ -4128,13 +4128,9 @@
          (draw)
          #(js/clearInterval id)))
      [state-ref])
-    ($ :div {:class "relative"}
-       ($ :canvas {:ref canvas-ref :width W :height H
-                   :class (str "block w-[480px] max-w-[45vw] rounded-md border-2 [image-rendering:pixelated] "
-                               (if (= shown :mountains) "border-slate-300" "border-amber-800"))})
-       (when (= shown :mountains)
-         ($ :div {:class "absolute top-1 left-2 rounded bg-slate-800/70 px-1.5 text-xs font-bold text-slate-100 select-none"}
-            "Mountains")))))
+    ($ :canvas {:ref canvas-ref :width W :height H
+                :class (str "block w-[480px] max-w-[45vw] rounded-md border-2 [image-rendering:pixelated] "
+                            (if (= shown :mountains) "border-slate-300" "border-amber-800"))})))
 
 (defui space-map
   "Draws outer space one pixel per tile, refreshed twice a second, with the stars as
