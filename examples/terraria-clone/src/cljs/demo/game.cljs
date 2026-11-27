@@ -2,6 +2,7 @@
   "Side-scrolling tile world with a player moved by A, D and Space who digs with a
   mouse-aimed pickaxe and collects items from chests in caves."
   (:require [cljs.reader :as reader]
+            [clojure.string :as str]
             [demo.icons :as icons]
             [demo.music :as music]
             [uix.core :refer [$ defui use-effect use-ref use-state]]))
@@ -526,7 +527,7 @@
         n))))
 
 (declare strike-enemies stash portal-aimed? teleport gate-aimed? knock-gate strike-boss
-         strike-drone strike-alien strike-robber here-ship box-aimed? fly-ship aimed-mirror take-mirror)
+         strike-drone strike-alien strike-robber here-ship tally box-aimed? fly-ship aimed-mirror take-mirror)
 
 (defn- swing!
   "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
@@ -585,6 +586,7 @@
         (swap! state #(cond-> (-> %
                                   (stash (map (fn [[id n]] (assoc (dissoc (blocks id) :tile) :count n))
                                               (frequencies dug)))
+                                  (tally :dug (count dug))
                                   (assoc-in [:player :swing] swing-frames)
                                   (assoc-in [:player :facing]
                                             (if (< (first (:aim-at player)) (first (hand player))) -1 1))
@@ -1079,7 +1081,24 @@
   (or (first (keep-indexed (fn [i s] (when (= id (:id s)) i)) bag))
       (first (keep-indexed (fn [i s] (when-not s i)) bag))))
 
-(defn- add-coins [st n] (update st :coins (fnil + 0) n))
+(defn- tally
+  "Counts `n` more of `k` in today's log of events, which the newspaper reports the
+  next day."
+  [st k n]
+  (if (pos? n) (update-in st [:today k] (fnil + 0) n) st))
+
+(defn- tally-found
+  "Records the items in `items` as found today."
+  [st items]
+  (reduce (fn [st {:keys [id count]}] (update-in st [:today :found id] (fnil + 0) (or count 1)))
+          st items))
+
+(defn- add-coins
+  "Adds `n` coins, or takes them away when `n` is negative, and logs them as earned or
+  spent today."
+  [st n]
+  (-> (update st :coins (fnil + 0) n)
+      (tally (if (pos? n) :earned :spent) (js/Math.abs n))))
 
 (defn- stash
   "Adds coins from `items` to the coin purse and stacks every other item into the bag,
@@ -1127,6 +1146,8 @@
                            (-> st
                                (assoc-in [:chests i :open?] true)
                                (stash (:items c))
+                               (tally :chests 1)
+                               (tally-found (:items c))
                                (update :popups into
                                        (map-indexed (fn [n {:keys [id name count]}]
                                                       {:text (str "+" count " " name) :icon id
@@ -1383,6 +1404,9 @@
         (swap! state
                (fn [st]
                  (cond-> (-> st
+                             (tally :slimes (count dead))
+                             (tally :amulets (count amulets))
+                             (tally :keys (count arena-keys))
                              (assoc :enemies (filterv #(pos? (:hp %)) hit))
                              (update :particles into
                                      (mapcat #(puff % slime-color (if (pos? (:hp %)) 4 14)) hit)))
@@ -1428,6 +1452,7 @@
     (-> st
         (assoc-in [:away realm] here)
         (merge there)
+        (update-in [:today :visited] (fnil conj #{}) to)
         (assoc :realm to :particles [] :popups [] :rockets [] :spawn-in 0))))
 
 (declare leave-arena)
@@ -1810,6 +1835,7 @@
                            (-> st
                                (dissoc :boss)
                                (assoc :goo-beaten? true)
+                               (tally :goo 1)
                                (update :particles into
                                        (mapcat #(puff % "#8fe86b" 8) (filter :minion? (:enemies st))))
                                (update :enemies #(filterv (complement :minion?) %))
@@ -1970,6 +1996,7 @@
                      (fn [st]
                        (cond-> (-> st
                                    (update :drones (fn [ds] (into (subvec ds 0 i) (subvec ds (inc i)))))
+                                   (tally :drones 1)
                                    (add-coins drone-reward)
                                    (update :particles into (sparks 18))
                                    (update :popups conj {:text (str "Drone destroyed! +" drone-reward) :icon :coin
@@ -2113,6 +2140,7 @@
       (cond-> (assoc st :aliens aliens :stars stars :star-in star-in)
         (pos? got)
         (-> (stash [(assoc star-item :count got)])
+            (tally :stars got)
             (assoc :star-shop? true)
             (update :popups conj {:text (str "+" got " Star") :icon :star :x px :y (- (:y player) 10) :life 90}))
         touching
@@ -2163,6 +2191,7 @@
               :hit)
           (do (swap! state #(-> %
                                 (update :aliens (fn [as] (into (subvec as 0 i) (subvec as (inc i)))))
+                                (tally :aliens 1)
                                 (add-coins alien-reward)
                                 (update :particles into (goo 16))
                                 (update :popups conj {:text (str "+" alien-reward) :icon :coin
@@ -2297,6 +2326,7 @@
         (assoc-in [:robbers thief :flee] robber-flee-frames)
         (and thief (pos? n))
         (-> (add-coins (- n))
+            (tally :stolen n)
             (update-in [:robbers thief :stolen] + n)
             (update :popups conj {:text (str "A robber stole " n " coins!") :icon :coin
                                   :x px :y (- (:y player) 10) :life 120}))
@@ -2342,6 +2372,8 @@
           (let [back (quot stolen 2)]
             (swap! state #(cond-> (-> %
                                       (update :robbers (fn [rs] (into (subvec rs 0 i) (subvec rs (inc i)))))
+                                      (tally :robbers 1)
+                                      (tally :recovered back)
                                       (update :particles into (dust 18)))
                             (pos? back)
                             (-> (add-coins back)
@@ -2398,6 +2430,9 @@
                 (conj :fluffies)
                 (and (= :overworld realm) (some #(near-player? st (:x %) (:y %) (* 40 T)) robbers)) (conj :robbers)
                 goo-beaten? (conj :drones)
+                (or (:paper st)
+                    (some->> (:paperboy st) ((fn [b] (near-player? st (:x b) (:y b) (* 30 T))))))
+                (conj :paper)
                 (or (= :space realm) star-shop? (has? :star)) (conj :space))
         seen  (or (:seen st) #{})]
     (if (every? seen found)
@@ -2416,6 +2451,153 @@
       (.fillRect ctx (- sx 1) (- sy 10) (+ robber-w 2) 5)
       (set! (.-fillStyle ctx) "#e53935")
       (.fillRect ctx sx (- sy 9) (js/Math.round (* robber-w (/ (max 0 hp) robber-hp))) 3))))
+
+;; the newspaper: a paperboy sells a paper about the day before once the player has
+;; made friends with enough Fluffies
+
+(def paper-price 5)
+(def paperboy-friends 6)
+(def paperboy-w 18)
+(def paperboy-h 38)
+
+(defn- day-number
+  "Returns the number of the day, counted from 1, that game time `clock` falls in. A
+  day starts at sunrise and runs through the night after it."
+  [clock]
+  (inc (js/Math.floor (/ (+ clock start-ms) (+ day-ms night-ms)))))
+
+(defn friend-count
+  "Counts the Fluffies that have become the player's friends."
+  [fluffies]
+  (count (filter #(or (:friend? %) (:following? %) (:home %)) fluffies)))
+
+(defn- roll-day
+  "At sunrise keeps the finished day's log as `:yesterday` and starts an empty one."
+  [st clock]
+  (let [n (day-number clock)]
+    (cond
+      (nil? (:day st)) (assoc st :day n)
+      (= n (:day st))  st
+      :else (assoc st :day n :yesterday {:day (:day st) :log (or (:today st) {})} :today {}))))
+
+(defn- spawn-paperboy
+  "Returns a paperboy on the surface 18 to 27 tiles to one side of `px`, facing it."
+  [^js tiles px]
+  (let [side (if (< (js/Math.random) 0.5) -1 1)
+        tx (-> (+ (js/Math.floor (/ px T)) (* side (+ 18 (rand-int 10)))) (max 3) (min (- W 5)))]
+    {:x (+ (* tx T) 1) :y (- (* T (min (ground-row tiles tx) (ground-row tiles (inc tx)))) paperboy-h 0.01)
+     :w paperboy-w :h paperboy-h :vx 0 :vy 0 :ground? false
+     :dir (- side) :home-x (* tx T) :turn-in (+ 240 (rand-int 240)) :walked 0}))
+
+(defn- by-paperboy?
+  "Checks that the player stands next to the paperboy."
+  [{:keys [player paperboy realm]}]
+  (and paperboy (= realm :overworld)
+       (< (js/Math.abs (- (+ (:x paperboy) (/ paperboy-w 2)) (+ (:x player) (/ player-w 2)))) (* 3 T))
+       (< (js/Math.abs (- (:y paperboy) (:y player))) (* 3 T))))
+
+(defn- step-paperboy
+  "Moves paperboy `b` one frame. He strolls back and forth within 40 tiles of where he
+  came in, hops over steps, and stops to sell when the player is next to him."
+  [tiles b player dt]
+  (let [b (loop [b b n 0]
+            (if (and (< n H) (box-hits? tiles (:x b) (:y b) paperboy-w paperboy-h))
+              (recur (assoc b :y (- (:y b) T) :vy 0) (inc n))
+              b))
+        {:keys [x dir turn-in home-x ground?]} b
+        near? (and (< (js/Math.abs (- (+ x (/ paperboy-w 2)) (+ (:x player) (/ player-w 2)))) (* 2.5 T))
+                   (< (js/Math.abs (- (:y b) (:y player))) (* 3 T)))
+        turn? (<= turn-in 0)
+        dir (cond (> (js/Math.abs (- x home-x)) (* 40 T)) (if (> x home-x) -1 1)
+                  turn? (if (< (js/Math.random) 0.5) -1 1)
+                  :else dir)
+        vx (if near? 0 (* dir 0.8))
+        vy (min max-fall (+ (:vy b) (* gravity dt)))
+        moved (-> b
+                  (assoc :dir (if near? (if (< (:x player) x) -1 1) dir) :vx vx :vy vy
+                         :turn-in (if turn? (+ 240 (rand-int 360)) (- turn-in dt)))
+                  (as-> s (move-x tiles s (* vx dt)))
+                  (as-> s (move-y tiles s (* vy dt)))
+                  (update :x #(max T (min (* T (- W 2)) %))))
+        blocked? (and ground? (zero? (:vx moved)) (not (zero? vx)))]
+    (cond-> (update moved :walked + (js/Math.abs (* (:vx moved) dt)))
+      blocked? (assoc :vy -7.5))))
+
+(defn- step-paper
+  "Starts a new day's log at sunrise, and on each day after the first sends a paperboy
+  to the overworld's surface once `paperboy-friends` Fluffies are the player's friends.
+  He leaves at nightfall."
+  [st clock dt]
+  (let [{:keys [realm player fluffies paperboy yesterday] :as st} (roll-day st clock)]
+    (if (not= realm :overworld)
+      st
+      (let [tiles (get-in st [:worlds :overworld :tiles])
+            day? (:day? (time-of-day clock))]
+        (cond
+          (not day?) (dissoc st :paperboy)
+          paperboy (update st :paperboy #(step-paperboy tiles % player dt))
+          (and yesterday (not= (:day st) (:paperboy-day st))
+               (>= (friend-count fluffies) paperboy-friends))
+          (assoc st :paperboy (spawn-paperboy tiles (+ (:x player) (/ player-w 2))) :paperboy-day (:day st))
+          :else st)))))
+
+(defn paper-stand
+  "Answers the E key for the newspaper: closes an open paper, or next to the paperboy
+  buys the paper about yesterday for `paper-price` coins, opening it again for free
+  once bought. Returns nil when neither applies."
+  [{:keys [paper-open? paper yesterday coins player] :as st}]
+  (let [popup (fn [st text] (update st :popups conj {:text text :x (+ (:x player) (/ player-w 2))
+                                                      :y (- (:y player) 10) :life 120}))]
+    (cond
+      paper-open? (assoc st :paper-open? false)
+      (not (by-paperboy? st)) nil
+      (= (:day paper) (:day yesterday)) (assoc st :paper-open? true)
+      (< (or coins 0) paper-price) (popup st (str "The paper costs " paper-price " coins"))
+      :else (-> st (add-coins (- paper-price)) (assoc :paper yesterday :paper-open? true)))))
+
+(defn- paperboy-label
+  "Returns the hint over the paperboy when the player stands next to him, or nil."
+  [{:keys [paper yesterday] :as st}]
+  (when (by-paperboy? st)
+    (if (= (:day paper) (:day yesterday))
+      "E: read the paper"
+      (str "E: newspaper, " paper-price " coins"))))
+
+(defn draw-paperboy
+  "Draws paperboy `b` in a red cap and a blue shirt with a satchel of papers, with the
+  hint `label` over him when it is given."
+  [^js ctx {:keys [x y dir vx ground? walked]} cam-x cam-y label]
+  (let [sx (js/Math.round (- x cam-x))
+        sy (js/Math.round (- y cam-y))
+        moving? (and ground? (> (js/Math.abs vx) 0.3))
+        swing (if moving? (js/Math.round (* 3 (js/Math.sin (/ walked 6)))) 0)
+        rect (fn [color rx ry rw rh]
+               (set! (.-fillStyle ctx) color)
+               (.fillRect ctx (if (pos? dir) (+ sx rx) (- (+ sx paperboy-w) rx rw)) (+ sy ry) rw rh))]
+    (rect "#a0783c" -4 19 8 10)
+    (rect "#f5f5f5" -3 17 6 3)
+    (rect "#4a4a52" 3 28 5 10)
+    (rect "#4a4a52" 10 28 5 10)
+    (rect "#222222" (+ 3 swing) 35 5 3)
+    (rect "#222222" (- 10 swing) 35 5 3)
+    (rect "#3f7fd9" 2 15 14 14)
+    (rect "#7a4a24" 4 15 3 14)
+    (rect "#f1c27d" (+ 8 (- swing)) 17 4 11)
+    (rect "#f1c27d" 3 3 13 13)
+    (rect "#1d1d1d" 12 8 2 3)
+    (rect "#d84315" 2 0 15 5)
+    (rect "#bf360c" 12 4 8 2)
+    (when label
+      (.save ctx)
+      (set! (.-font ctx) "bold 11px system-ui, sans-serif")
+      (set! (.-textAlign ctx) "center")
+      (let [w (+ 12 (.-width (.measureText ctx label)))
+            cx (+ sx (/ paperboy-w 2))]
+        (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+        (.fillRect ctx (- cx (/ w 2)) (- sy 24) w 17)
+        (set! (.-fillStyle ctx) "#ffffff")
+        (.fillText ctx label cx (- sy 12)))
+      (.restore ctx))))
 
 (def tame-reach (* 8 T))
 
@@ -2742,6 +2924,9 @@
       (let [follow? (not (:following? f))]
         (-> st
             (cond-> (and follow? (quest-friend? st i)) (assoc-in [:quest :found?] true))
+            ;; the first time a Fluffy follows, it becomes a friend for good
+            (cond-> (and follow? (not (:friend? f))) (-> (assoc-in [:fluffies i :friend?] true)
+                                                         (tally :friends 1)))
             (update-in [:fluffies i] assoc :following? follow? :hx (:x f) :hy (:y f))
             (update :popups conj {:text (cond
                                           (:alien? f) (if follow? "The tame alien follows you!" "The tame alien waits here")
@@ -2851,6 +3036,7 @@
          (let [[hx hy] (house-hole h)
                top (- (house-bottom h) house-h 14)]
            (cond-> (-> st
+                       (tally :moved-in 1)
                        (assoc-in [:houses hi :resident] i)
                        (update-in [:fluffies i] assoc :following? false :home hi :hx hx :hy hy))
              (not lost?)
@@ -3370,7 +3556,7 @@
   records in `seen`, so the help does not give away what is still to come."
   [{:keys [seen]}]
   (let [seen (or seen #{})
-        hidden (count (remove seen [:rope :slimes :dimension :goo :fluffies :robbers :drones :space]))]
+        hidden (count (remove seen [:rope :slimes :dimension :goo :fluffies :robbers :drones :space :paper]))]
     ($ :div {:class "max-h-[55vh] overflow-y-auto pr-1"}
        ($ help-section {:title "Controls"}
           ($ :li "A and D move, Space jumps")
@@ -3405,6 +3591,10 @@
             ($ :li "Rare blue Fluffies hide in caves around the world; press E next to one to make it follow you, and E again to let it wait")
             ($ :li "Buy a Fluffy House at the shop and place it on the ground from the bag; a Fluffy following you moves into an empty house and pays you " house-reward " coins")
             ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")))
+       (when (seen :paper)
+         ($ help-section {:title "The newspaper"}
+            ($ :li "Every morning a paperboy in a red cap walks the surface; press E next to him to buy The Mine Valley Times for " paper-price " coins")
+            ($ :li "The paper tells what you got up to the day before; once bought, press E next to him to read it again")))
        (when (seen :robbers)
          ($ help-section {:title "Robbers"}
             ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
@@ -3450,7 +3640,7 @@
   the time of day) as an EDN string."
   [st]
   (pr-str (-> st
-              (dissoc :keys :mouse :mouse-down? :particles :popups :rockets :clock-offset :paused?)
+              (dissoc :keys :mouse :mouse-down? :particles :popups :rockets :clock-offset :paused? :paper-open?)
               (update :worlds #(update-vals % pack-world)))))
 
 (defn- merge-inventory
@@ -4016,6 +4206,223 @@
               :on-pointer-down (fn [^js e] (.preventDefault e) (on-press))}
      "E"))
 
+;; The Mine Valley Times. The stories are put together from the day's log with
+;; sentence patterns, picked by the day number so each paper reads differently.
+
+(defn- pick
+  "Picks one of `options` for story `k` in the paper of day `seed`."
+  [seed k options]
+  (nth options (mod (js/Math.floor (* 997 (hash2 seed (hash k)))) (count options))))
+
+(defn- plural [n one many] (str n " " (if (= 1 n) one many)))
+
+(def ^:private item-names
+  (into {} (map (juxt :id :name)) (concat loot [coin amulet arena-key])))
+
+(defn- news-stories
+  "Returns the stories for the paper about the day logged in `log`, most newsworthy
+  first. Each has a `:title`, a `:text`, a `:pic` for its picture and a `:score`."
+  [log seed]
+  (let [{:keys [slimes goo robbers stolen recovered aliens stars friends moved-in chests
+                found dug earned fainted amulets drones visited]
+         :or {slimes 0 robbers 0 stolen 0 recovered 0 aliens 0 stars 0 friends 0 moved-in 0
+              chests 0 dug 0 earned 0 fainted 0 amulets 0 drones 0}} log
+        arena-keys (:keys log 0)
+        p (fn [k options] (pick seed k options))]
+    (->> [(when goo
+            {:score 1000 :pic {:icon :crown}
+             :title (p :goo ["LORD OF GOO DEFEATED!" "THE GOO IS GONE!" "VALLEY HERO TOPPLES SLIME KING"])
+             :text (p :goo-t ["In a battle that shook the Slime Dimension, a brave miner brought down the Lord of Goo. Witnesses say the arena is \"much less sticky now\"."
+                              "The Lord of Goo is no more. Slimes across the valley are said to be considering early retirement."])})
+          (when (pos? robbers)
+            {:score (* 40 robbers) :pic :robber
+             :title (p :rob ["MASKED ROBBER CAUGHT" "CRIME DOES NOT PAY" "PICKAXE JUSTICE ON MAIN STREET"])
+             :text (str (p :rob-t ["A pickaxe-swinging local knocked out " "Our reporter watched as a miner sent "])
+                        (plural robbers "robber" "robbers")
+                        (p :rob-t2 [" on the surface" " sprawling into the grass"])
+                        (if (pos? recovered) (str " and won back " (plural recovered "coin" "coins") ".") "."))})
+          (when (and (pos? stolen) (zero? (or robbers 0)))
+            {:score (* 3 stolen) :pic :robber
+             :title (p :stolen ["ROBBER STRIKES AGAIN" "COINS VANISH IN BROAD DAYLIGHT" "WATCH YOUR PURSE!"])
+             :text (str "A masked figure in a striped shirt made off with " (plural stolen "coin" "coins")
+                        (p :stolen-t [". Police advise carrying a pickaxe." ". The thief is still at large." ". Residents are urged to keep their coins close."]))})
+          (when (pos? friends)
+            {:score (* 25 friends) :pic :fluffy
+             :title (p :friends ["NEW FRIENDSHIP BLOOMS" "FLUFFY FOLLOWS LOCAL MINER" "FEATHERS AND FRIENDSHIP"])
+             :text (str (plural friends "Fluffy has" "Fluffies have")
+                        (p :friends-t [" been seen following a miner everywhere they go." " joined the miner's little flock. Experts call it \"adorable\"."]))})
+          (when (pos? moved-in)
+            {:score (* 20 moved-in) :pic {:icon :house}
+             :title (p :home ["HOUSEWARMING IN THE VALLEY" "FLUFFY MOVES INTO NEW HOME" "PROPERTY MARKET HEATS UP"])
+             :text (str (plural moved-in "Fluffy" "Fluffies")
+                        (p :home-t [" moved into a brand new house yesterday." " found a home of their own. The neighbours brought cake."]))})
+          (when (pos? slimes)
+            {:score (* 3 slimes) :pic :slime
+             :title (p :slimes [(str (plural slimes "SLIME" "SLIMES") " BOUNCED OUT OF THE CAVES")
+                                (str "NIGHT OF THE PICKAXE: " slimes " SLIMES FALL")
+                                "SLIME NUMBERS DROP"])
+             :text (str (p :slimes-t ["Cave dwellers report " "Miners counted " "The slime census shows "])
+                        (plural slimes "slime" "slimes")
+                        (p :slimes-t2 [" fewer than the day before." " squashed by a single pickaxe." " gone. The rest are keeping their heads down."]))})
+          (when (pos? aliens)
+            {:score (* 6 aliens) :pic :alien
+             :title (p :aliens ["ALIENS POPPED OVER THE ASTEROIDS" "CLOSE ENCOUNTERS OF THE PICKAXE KIND" "SPACE GETS A LITTLE QUIETER"])
+             :text (str (plural aliens "purple alien was" "purple aliens were")
+                        (p :aliens-t [" popped among the asteroids." " sent back to wherever aliens come from."]))})
+          (when (pos? fainted)
+            {:score 30 :pic :player
+             :title (p :faint ["MINER FAINTS, RECOVERS" "A BAD DAY AT THE OFFICE" "LOCAL MINER TAKES A LONG NAP"])
+             :text (str "Our favourite miner fainted " (if (= 1 fainted) "once" (str fainted " times"))
+                        (p :faint-t [" but was back on their feet by morning." ". Doctors prescribe Healing Potions and fewer slimes."]))})
+          (when (or (pos? amulets) (pos? arena-keys))
+            {:score 28 :pic {:icon (if (pos? arena-keys) :key :amulet)}
+             :title (if (pos? arena-keys) "MYSTERIOUS KEY TURNS UP" "STRANGE AMULET FOUND")
+             :text (if (pos? arena-keys)
+                     "A slime from the other dimension dropped a heavy key. Where does it lead? Somewhere to the east, rumour has it."
+                     "A slime coughed up a glowing amulet. Scholars say it opens a door to somewhere much greener.")})
+          (when (pos? drones)
+            {:score (* 12 drones) :pic {:icon :rocket}
+             :title "DRONE DOWN!"
+             :text (str (plural drones "drone was" "drones were") " knocked out of the sky. Some say a spaceship was seen landing nearby.")})
+          (when (contains? visited :space)
+            {:score 22 :pic :space
+             :title (p :space ["MINER SIGHTED AMONG THE STARS" "ONE SMALL HOP FOR A MINER"])
+             :text (str "Yesterday our miner travelled to outer space"
+                        (if (pos? stars) (str " and brought back " (plural stars "star" "stars") ".") ". The view is said to be excellent."))})
+          (when (and (pos? stars) (not (contains? visited :space)))
+            {:score (* 2 stars) :pic {:icon :star}
+             :title "STARS COLLECTED" :text (str (plural stars "star was" "stars were") " collected from the sky.")})
+          (when (contains? visited :slime)
+            {:score 15 :pic :slime
+             :title "TRIP TO THE SLIME DIMENSION" :text "A portal opened and a miner stepped through into the green. They came back smelling faintly of ooze."})
+          (when (pos? chests)
+            {:score (* 8 chests) :pic {:icon (or (first (remove #{:coin} (keys found))) :ruby)}
+             :title (p :chests ["TREASURE FOUND IN THE CAVES" "CHEST OPENED, CONTENTS REVEALED" "LUCKY DAY UNDERGROUND"])
+             :text (str (plural chests "chest was" "chests were") " opened deep in the caves"
+                        (when (seq found)
+                          (str ", holding " (str/join ", " (for [[id n] (take 3 found)] (str n " " (item-names id (name id))))))) ".")})
+          (when (> (or dug 0) 40)
+            {:score (quot dug 10) :pic {:icon :dirt}
+             :title (p :dug ["MINER MOVES MOUNTAINS" "DIGGING RECORD BROKEN?" "THE VALLEY HAS NEW HOLES"])
+             :text (str (plural dug "block" "blocks") " of earth and stone were dug up yesterday.")})
+          (when (> (or earned 0) 30)
+            {:score (quot earned 5) :pic {:icon :coin}
+             :title "BUSINESS IS BOOMING" :text (str "The miner earned " (plural earned "coin" "coins") " yesterday. The shopkeeper is smiling.")})]
+         (remove nil?)
+         (sort-by :score >)
+         vec)))
+
+(defn newspaper
+  "Returns the paper about day `day` from its `log`: a headline story, the other
+  stories and the day's numbers."
+  [{:keys [day log]}]
+  (let [stories (news-stories log day)
+        quiet {:score 0 :pic :fluffy
+               :title (pick day :quiet ["A QUIET DAY IN MINE VALLEY" "NOTHING TO REPORT" "ALL CALM IN THE VALLEY"])
+               :text (pick day :quiet-t ["Nothing much happened yesterday. The Fluffies napped, the slimes sulked, and the editor went fishing."
+                                         "The valley had a calm day. Our reporters spent it watching the clouds."])}]
+    {:day day
+     :lead (or (first stories) quiet)
+     :more (take 4 (rest stories))
+     :numbers (remove nil? [(when (pos? (:earned log 0)) ["Coins earned" (:earned log)])
+                            (when (pos? (:spent log 0)) ["Coins spent or lost" (:spent log)])
+                            (when (pos? (:dug log 0)) ["Blocks dug" (:dug log)])
+                            (when (pos? (:slimes log 0)) ["Slimes defeated" (:slimes log)])
+                            (when (pos? (:chests log 0)) ["Chests opened" (:chests log)])
+                            (when (pos? (:stars log 0)) ["Stars collected" (:stars log)])])
+     :found (:found log)
+     :weather (pick day :weather ["Tomorrow: sunny, with a chance of slime."
+                                  "Weather: clear skies by day, glowing eyes by night."
+                                  "Forecast: dry above ground, damp below."])}))
+
+(defn- draw-news-picture
+  "Draws the picture `pic` for a newspaper story on `canvas`, using the game's own
+  drawing of the subject on a strip of ground."
+  [^js canvas pic]
+  (let [ctx (.getContext canvas "2d")
+        w 80 h 56 ground 48]
+    (.setTransform ctx 2 0 0 2 0 0)
+    (set! (.-imageSmoothingEnabled ctx) false)
+    (set! (.-fillStyle ctx) (if (= pic :space) "#14122b" "#cfe3f0"))
+    (.fillRect ctx 0 0 w h)
+    (if (= pic :space)
+      (doseq [i (range 14)]
+        (set! (.-fillStyle ctx) "#ffffff")
+        (.fillRect ctx (js/Math.floor (* w (hash2 i 7))) (js/Math.floor (* h (hash2 7 i))) 1 1))
+      (do (set! (.-fillStyle ctx) "#5cb83a")
+          (.fillRect ctx 0 ground w 3)
+          (set! (.-fillStyle ctx) "#8b5a2b")
+          (.fillRect ctx 0 (+ ground 3) w (- h ground 3))))
+    (case pic
+      :slime    (draw-enemies ctx [{:x 29 :y (- ground slime-h) :vy 0 :flash 0 :ground? true}] 0 w h 0 0)
+      :robber   (draw-robber ctx {:x 31 :y (- ground robber-h) :dir 1 :vx 0 :ground? true :walked 0 :flash 0 :stolen 1} 0 0)
+      :alien    (draw-alien ctx 28 18 0 0 0)
+      :fluffy   (draw-fluffies ctx [{:x 40 :y 34 :realm :overworld :phase 0}] :overworld 0 0 0)
+      :player   (draw-player ctx {:x 31 :y (- ground player-h) :facing 1 :walked 0 :ground? true :vx 0} 0 0 false)
+      :space    (draw-player ctx {:x 31 :y 9 :facing 1 :walked 0 :ground? false :vx 0} 0 0 true)
+      :paperboy (draw-paperboy ctx {:x 31 :y (- ground paperboy-h) :dir 1 :vx 0 :ground? true :walked 0} 0 0 nil)
+      nil)))
+
+(defui news-picture [{:keys [pic big?]}]
+  (let [ref (use-ref nil)]
+    (use-effect (fn [] (when-let [c @ref] (draw-news-picture c pic)) js/undefined) [pic])
+    (if (map? pic)
+      ($ :div {:class (str "flex shrink-0 items-center justify-center border border-stone-400 bg-[#cfe3f0] "
+                           (if big? "h-28 w-40" "h-14 w-20"))}
+         ($ icons/icon {:id (:icon pic) :size (if big? 56 28)}))
+      ($ :canvas {:ref ref :width 160 :height 112
+                  :class (str "shrink-0 border border-stone-400 [image-rendering:pixelated] sepia-[.35] "
+                              (if big? "h-28 w-40" "h-14 w-20"))}))))
+
+(defui newspaper-panel
+  "Shows the bought paper as a newspaper page over the game."
+  [{:keys [paper on-close]}]
+  (let [{:keys [day lead more numbers found weather]} (newspaper paper)]
+    ($ :div {:class "absolute inset-0 z-20 flex items-center justify-center bg-black/50 p-4"
+             :on-click on-close}
+       ($ :div {:class "max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-sm bg-[#f4ecd8] p-5 font-serif text-stone-900 shadow-2xl"
+                :on-click #(.stopPropagation %)}
+          ($ :div {:class "border-b-4 border-double border-stone-800 pb-1 text-center"}
+             ($ :div {:class "text-3xl font-black tracking-tight sm:text-4xl"} "The Mine Valley Times")
+             ($ :div {:class "mt-1 flex justify-between text-xs uppercase tracking-wider text-stone-600"}
+                ($ :span (str "Day " day))
+                ($ :span "The valley's only newspaper")
+                ($ :span (str paper-price " coins"))))
+          ($ :div {:class "mt-3 flex flex-col gap-3 sm:flex-row"}
+             ($ news-picture {:pic (:pic lead) :big? true})
+             ($ :div
+                ($ :h2 {:class "text-2xl font-black leading-tight"} (:title lead))
+                ($ :p {:class "mt-1 text-sm leading-snug"} (:text lead))))
+          (when (seq more)
+            ($ :div {:class "mt-3 grid gap-3 border-t border-stone-400 pt-3 sm:grid-cols-2"}
+               (for [{:keys [title text pic]} more]
+                 ($ :div {:key title :class "flex gap-2"}
+                    ($ news-picture {:pic pic})
+                    ($ :div
+                       ($ :h3 {:class "text-sm font-bold leading-tight"} title)
+                       ($ :p {:class "mt-0.5 text-xs leading-snug"} text))))))
+          ($ :div {:class "mt-3 grid gap-3 border-t border-stone-400 pt-3 text-xs sm:grid-cols-2"}
+             ($ :div
+                ($ :div {:class "mb-1 font-bold uppercase tracking-wider"} "Yesterday in numbers")
+                (if (seq numbers)
+                  (for [[label n] numbers]
+                    ($ :div {:key label :class "flex justify-between border-b border-dotted border-stone-400"}
+                       ($ :span label) ($ :span {:class "font-mono"} n)))
+                  ($ :div {:class "italic"} "Nothing worth counting.")))
+             ($ :div
+                (when (seq found)
+                  ($ :<>
+                     ($ :div {:class "mb-1 font-bold uppercase tracking-wider"} "Found in the caves")
+                     ($ :div {:class "flex flex-wrap gap-2"}
+                        (for [[id n] found]
+                          ($ :span {:key (name id) :class "flex items-center gap-1"}
+                             ($ icons/icon {:id id :size 18}) n)))))
+                ($ :div {:class "mt-2 italic"} weather)))
+          ($ :div {:class "mt-4 text-center"}
+             ($ :button {:class "rounded bg-stone-800 px-4 py-1.5 font-sans text-sm font-semibold text-[#f4ecd8] hover:bg-stone-700"
+                         :on-click on-close}
+                "Close (E)"))))))
+
 (defui game []
   (let [canvas-ref (use-ref nil)
         state-ref (use-ref nil)
@@ -4031,12 +4438,14 @@
         [star-shop? set-star-shop!] (use-state false)
         [space-map? set-space-map!] (use-state false)
         [in-space? set-in-space!] (use-state false)
+        ;; the newspaper the player is reading, if any
+        [paper set-paper!] (use-state nil)
         ;; the touch controls show from the first touch on
         [touch? set-touch!] (use-state false)
         on-press-e (fn []
                      (when-let [state @state-ref]
                        (when-not (:paused? @state)
-                         (swap! state #(or (toggle-shop %) (accept-quest %) (toggle-fluffy %))))))
+                         (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (toggle-fluffy %))))))
         on-use-slot (fn [i]
                       (when-let [state @state-ref]
                         (when-not (:paused? @state)
@@ -4092,7 +4501,7 @@
                          (case (.-code e)
                            "KeyM" (when-not (.-repeat e) (set-menu! not))
                            "KeyE" (when-not (or (.-repeat e) (:paused? @state))
-                                    (swap! state #(or (toggle-shop %) (accept-quest %) (toggle-fluffy %))))
+                                    (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (toggle-fluffy %))))
                            ("Digit1" "Digit2" "Digit3" "Digit4" "Digit5" "Digit6" "Digit7" "Digit8" "Digit9" "Digit0")
                            (when-not (or (.-repeat e) (:paused? @state))
                                                              ;; Digit0 is the tenth slot
@@ -4196,7 +4605,7 @@
                                  (flow-ooze! (:tiles world) levels @flips))
                              _ (step-enemies! state (:tiles world) (:surface world) light dt)
                              _ (step-boss! state (:tiles world) dt)
-                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt) discover))
+                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt) (step-paper clock dt) discover))
                              _ (set-quest! (:quest @state))
                              _ (when (and (= :slime (:realm @state)) (:gate-open? @state)
                                           (touching? player (assoc (:gate world) :w gate-w :h gate-h)))
@@ -4212,6 +4621,7 @@
                                       (fn [st]
                                         (if (<= (get-in st [:player :hp] max-hp) 0)
                                           (-> st
+                                              (tally :fainted 1)
                                               (cond-> (not= :overworld (:realm st)) (switch-realm :overworld))
                                               (dissoc :boss)
                                               (assoc :player (spawn home))
@@ -4226,6 +4636,7 @@
                              _ (set-map! (boolean (:map? @state)))
                              _ (set-space-map! (boolean (:space-map? @state)))
                              _ (set-in-space! space?)
+                             _ (set-paper! (when (:paper-open? @state) (:paper @state)))
                              _ (set-star-shop! (boolean (or (:star-shop? @state)
                                                             (pos? (star-count-in (:bag @state))))))
                              _ (set-hp! (/ (js/Math.floor (* 10 (get-in @state [:player :hp]))) 10))
@@ -4255,7 +4666,9 @@
                            (when (home?)
                              (when-let [ship (:ship @state)] (draw-ship ctx ship t cam-x cam-y))
                              (draw-drones ctx (:drones @state) t cam-x cam-y)
-                             (draw-robbers ctx (:robbers @state) cam-x cam-y))
+                             (draw-robbers ctx (:robbers @state) cam-x cam-y)
+                             (when-let [b (:paperboy @state)]
+                               (draw-paperboy ctx b cam-x cam-y (paperboy-label @state))))
                            (when space?
                              (draw-ship ctx (get-in @state [:worlds :space :ship]) t cam-x cam-y))
                            (draw-houses ctx (:houses @state) (:realm @state) cam-x cam-y)
@@ -4348,6 +4761,9 @@
                         :map? map? :on-buy-map on-buy-map
                         :star-shop? star-shop? :on-buy-star on-buy-star
                         :space-map? space-map? :on-buy-space-map on-buy-space-map}))
+       (when paper
+         ($ newspaper-panel {:paper paper
+                             :on-close #(some-> @state-ref (swap! assoc :paper-open? false))}))
        (when menu?
          ($ menu-panel {:on-close #(set-menu! false)
                         ;; the game is paused while the menu is open, so this stays current
