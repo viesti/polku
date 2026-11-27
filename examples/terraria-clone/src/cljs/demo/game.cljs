@@ -24,6 +24,7 @@
 (def asteroid 10)
 (def snow 11)
 (def ore 12)
+(def hay 13)
 (def rope-len 10)
 
 (def blocks
@@ -33,6 +34,7 @@
 (def stack-max {:dirt 100 :stone 100})
 
 (def ore-item {:id :ore :name "Iron Ore" :icon "🪨"})
+(def hay-item {:id :hay :name "Hay" :icon "🌾"})
 (def climb-v 2.2)
 
 (def player-w 18)
@@ -175,6 +177,23 @@
       (aset surface tx floor))
     {:tx x :ty floor}))
 
+(defn- hay-spot?
+  "Checks that hay can grow at column `x`: on grass with open air above it, and in the
+  mountains only down in the valleys, not up on the slopes and peaks."
+  [^js tiles x mountains?]
+  (let [s (loop [y 0] (if (or (>= y (dec H)) (not= air (aget tiles (idx x y)))) y (recur (inc y))))]
+    (when (and (pos? s) (= grass (aget tiles (idx x s)))
+               (or (not mountains?) (> s 38)))
+      (dec s))))
+
+(defn- sow-hay!
+  "Puts a tuft of hay on roughly one grass column in `every`."
+  [^js tiles mountains? every]
+  (doseq [x (range 2 (- W 2))
+          :when (< (hash2 x (if mountains? 913 911)) (/ 1 every))]
+    (when-let [y (hay-spot? tiles x mountains?)]
+      (aset tiles (idx x y) hay))))
+
 (defn generate []
   (let [tiles (js/Uint8Array. (* W H))
         surface (js/Int32Array. W)]
@@ -200,6 +219,7 @@
           (when plant? (plant-tree! tiles x s))
           (recur (inc x) (if plant? x last)))))
     (let [shop (place-shop! tiles surface)]
+      (sow-hay! tiles false 14)
       {:tiles tiles :surface surface :shop shop :chests (place-chests tiles surface)})))
 
 ;; the mountains: peaks rise to `peak-top`, valleys sink to `valley-floor`, and the
@@ -260,6 +280,7 @@
                           (= grass (aget tiles (idx x s))))]
           (when plant? (plant-tree! tiles x s))
           (recur (inc x) (if plant? x last)))))
+    (sow-hay! tiles true 5)
     {:tiles tiles :surface surface :chests (place-chests tiles surface)}))
 
 (def portal-w 26)
@@ -440,20 +461,24 @@
 (defn- step-free
   "Moves a player who is not on a rope. In ooze the player moves slowly, sinks gently
   and swims up with Space, hopping out when the head is above the surface. A player
-  marked `:low-g?` falls under `space-g` of normal gravity."
+  marked `:low-g?` falls under `space-g` of normal gravity. A player marked `:flung?`
+  flies on without steering until landing."
   [tiles p keys dt]
-  (let [dir (- (if (keys "KeyD") 1 0) (if (keys "KeyA") 1 0))
-        jump? (keys "Space")
+  (let [flung? (:flung? p)
+        dir (if flung? 0 (- (if (keys "KeyD") 1 0) (if (keys "KeyA") 1 0)))
+        jump? (and (not flung?) (keys "Space"))
         cx (+ (:x p) (/ player-w 2))
         wet? (ooze-at? tiles cx (+ (:y p) (* 0.6 player-h)))
         head-out? (not (ooze-at? tiles cx (+ (:y p) 6)))
-        vx (+ (:vx p) (* (- (* dir run-v (if wet? 0.5 1)) (:vx p)) (min 1 (* 0.25 dt))))
+        vx (if flung?
+             (:vx p)
+             (+ (:vx p) (* (- (* dir run-v (if wet? 0.5 1)) (:vx p)) (min 1 (* 0.25 dt)))))
         vy (cond
              (and wet? jump? head-out?) (* 0.8 jump-v)
              (and wet? jump?) (max -2.6 (- (:vy p) (* 0.5 dt)))
              (and jump? (:ground? p)) jump-v
              ;; letting go of Space early gives a shorter jump
-             (and (not jump?) (< (:vy p) -3)) -3
+             (and (not jump?) (not flung?) (< (:vy p) -3)) -3
              :else (:vy p))
         vy (cond
              wet? (min 2 (+ vy (* 0.15 dt)))
@@ -464,12 +489,16 @@
         p (assoc p :vx vx :vy vy
                  :facing (cond (pos? dir) 1 (neg? dir) -1 :else (:facing p))
                  :walked (+ (:walked p) (js/Math.abs dx)))]
-    (reduce (fn [p _]
-              (as-> p p
-                (move-x tiles p (/ dx n))
-                (move-y tiles p (/ (* (:vy p) dt) n))))
-            p
-            (range n))))
+    (let [p (reduce (fn [p _]
+                      (as-> p p
+                        (move-x tiles p (/ dx n))
+                        (move-y tiles p (/ (* (:vy p) dt) n))))
+                    p
+                    (range n))]
+      ;; standing on something, or in ooze, ends the flight
+      (if (and flung? (or wet? (box-hits? tiles (:x p) (+ (:y p) 1) player-w player-h)))
+        (assoc p :flung? false :vx 0)
+        p))))
 
 (defn- on-rope?
   "Checks whether a rope tile overlaps the player's centre column."
@@ -521,7 +550,8 @@
    torch ["#ffb347" "#8a5a2b"]
    asteroid ["#6e6478" "#635a6c"]
    snow ["#eef3f8" "#e3eaf1"]
-   ore ["#75706f" "#6b6665"]})
+   ore ["#75706f" "#6b6665"]
+   hay ["#e0c060" "#b89a40"]})
 
 (defn- hand [{:keys [x y]}]
   [(+ x (/ player-w 2)) (+ y 22)])
@@ -540,7 +570,7 @@
           (when (<= step reach)
             (let [tx (js/Math.floor (/ (+ hx (* dx (/ step d))) T))
                   ty (js/Math.floor (/ (+ hy (* dy (/ step d))) T))]
-              (if (let [t (tile-at tiles tx ty)] (or (solid? t) (= rope t) (= torch t)))
+              (if (let [t (tile-at tiles tx ty)] (or (solid? t) (= rope t) (= torch t) (= hay t)))
                 [[tx ty]]
                 (recur (+ step 2))))))))))
 
@@ -593,7 +623,7 @@
         n))))
 
 (declare strike-enemies stash portal-aimed? teleport gate-aimed? knock-gate strike-boss
-         strike-drone strike-alien strike-robber here-ship tally box-aimed? fly-ship aimed-mirror take-mirror)
+         strike-drone strike-alien strike-robber strike-goat calm-goat here-ship tally box-aimed? fly-ship aimed-mirror take-mirror)
 
 (defn- swing!
   "Advances the pickaxe swing. A new swing strikes the enemies in front of the pickaxe,
@@ -622,7 +652,7 @@
       (do (swap! state knock-gate) true)
 
       (and (<= left 0) (or mouse-down? (keys "ShiftLeft") (keys "ShiftRight")))
-      (let [struck (or (strike-boss state) (strike-drone state) (strike-alien state) (strike-robber state)
+      (let [struck (or (strike-boss state) (strike-drone state) (strike-alien state) (strike-robber state) (strike-goat state)
                          (strike-enemies state))
             arena? (= :arena (:realm @state))
             hits (if struck
@@ -646,14 +676,15 @@
                                  (let [t (aget tiles (idx tx ty))]
                                    (cond (or (= t grass) (= t dirt) (= t snow)) :dirt
                                          (or (= t stone) (= t slimestone) (= t asteroid)) :stone
-                                         (= t ore) :ore))))
+                                         (= t ore) :ore
+                                         (= t hay) :hay))))
                       hits)]
         (doseq [[tx ty] hits]
           (aset tiles (idx tx ty) air))
         (swap! state #(cond-> (-> %
-                                  (stash (map (fn [[id n]] (assoc (dissoc (or (blocks id) ore-item) :tile) :count n))
+                                  (stash (map (fn [[id n]] (assoc (dissoc (or (blocks id) ({:ore ore-item :hay hay-item} id)) :tile) :count n))
                                               (frequencies dug)))
-                                  (tally :dug (count dug))
+                                  (tally :dug (count (remove #{:hay} dug)))
                                   (tally :ore (count (filter #{:ore} dug)))
                                   (assoc-in [:player :swing] swing-frames)
                                   (assoc-in [:player :facing]
@@ -834,6 +865,13 @@
               (.fillRect ctx (+ sx 7) (+ sy 7) 3 9)
               (set! (.-fillStyle ctx) "#5a3418")
               (.fillRect ctx (+ sx 7) (+ sy 7) 3 2))
+
+          (= t hay)
+          (doseq [[bx bh lean] [[2 9 -1] [5 12 0] [8 10 1] [11 13 0] [13 8 1]]]
+            (set! (.-fillStyle ctx) (get-in palette [hay (mod bx 2)]))
+            (.fillRect ctx (+ sx bx) (+ sy (- T bh)) 2 bh)
+            (set! (.-fillStyle ctx) "#f2dc8a")
+            (.fillRect ctx (+ sx bx lean) (+ sy (- T bh) -1) 2 3))
 
           (= t rope)
           (do (when (> ty (aget surface tx))
@@ -1600,6 +1638,15 @@
             tx1 (js/Math.floor (/ (+ nx player-w -0.01) T))]
         (update st :player assoc :x nx :y (ground-y tiles tx0 tx1) :vy 0 :climbing? false))
       st)))
+
+(defn- sow-old-hay
+  "Sows hay once in worlds made before hay grew in them."
+  [st]
+  (if (:hay-sown? st)
+    st
+    (do (some-> (get-in st [:worlds :overworld :tiles]) (sow-hay! false 14))
+        (some-> (get-in st [:worlds :mountains :tiles]) (sow-hay! true 5))
+        (assoc st :hay-sown? true))))
 
 (declare leave-arena)
 
@@ -2556,6 +2603,177 @@
     (rect "#1d1d1d" 2 0 15 5)
     (rect "#3a3a3a" 2 4 15 1)))
 
+;; mountain goats wander the mountains, butt the player once hit, and calm down for hay
+(def goat-w 28)
+(def goat-h 24)
+(def max-goats 4)
+(def goat-calm-reach (* 5 T))
+
+(defn- spawn-goat
+  "Returns a calm goat standing on the ground at a random column at least 30 tiles
+  from `px`, or nil when that column is too close."
+  [^js tiles px]
+  (let [tx (+ 4 (rand-int (- W 10)))]
+    (when (> (js/Math.abs (- (* tx T) px)) (* 30 T))
+      {:x (+ (* tx T) 2) :y (- (* T (min (ground-row tiles tx) (ground-row tiles (inc tx)))) goat-h 0.01)
+       :w goat-w :h goat-h :vx 0 :vy 0 :ground? false :dir (if (< (js/Math.random) 0.5) -1 1)
+       :turn-in (+ 60 (rand-int 200)) :graze 0 :angry? false :flash 0 :knock 0 :walked 0})))
+
+(defn- step-goat
+  "Moves goat `g` one frame. A calm goat ambles about, stops now and then to graze and
+  leaps up any step in its way; an angry one charges at the player."
+  [tiles g player dt]
+  (let [g (loop [g g n 0]
+            (if (and (< n H) (box-hits? tiles (:x g) (:y g) goat-w goat-h))
+              (recur (assoc g :y (- (:y g) T) :vy 0) (inc n))
+              g))
+        {:keys [x dir knock turn-in graze ground? angry?]} g
+        dx (- (+ (:x player) (/ player-w 2)) (+ x (/ goat-w 2)))
+        turn? (<= turn-in 0)
+        grazing? (and (not angry?) (pos? graze))
+        dir (cond angry? (if (neg? dx) -1 1)
+                  turn? (if (< (js/Math.random) 0.5) -1 1)
+                  :else dir)
+        speed (cond angry? 2.5 grazing? 0 :else 0.8)
+        vx (if (pos? knock) (* (:vx g) 0.92) (* dir speed))
+        vy (min max-fall (+ (:vy g) (* gravity dt)))
+        moved (-> g
+                  (assoc :dir dir :vx vx :vy vy
+                         :knock (max 0 (- knock dt))
+                         :flash (max 0 (- (:flash g) dt))
+                         :graze (if (and turn? (< (js/Math.random) 0.4)) (+ 60 (rand-int 120)) (max 0 (- graze dt)))
+                         :turn-in (if turn? (+ 90 (rand-int 240)) (- turn-in dt)))
+                  (as-> s (move-x tiles s (* vx dt)))
+                  (as-> s (move-y tiles s (* vy dt)))
+                  (update :x #(max T (min (- (* T (dec W)) goat-w) %))))
+        blocked? (and ground? (zero? (:vx moved)) (not (zero? vx)))]
+    (cond-> (update moved :walked + (js/Math.abs (* (:vx moved) dt)))
+      ;; goats are good climbers and leap five tiles up
+      blocked? (assoc :vy -8.6)
+      ;; and now and then hop for the fun of it
+      (and ground? (not blocked?) (not grazing?) (< (js/Math.random) (* 0.004 dt))) (assoc :vy -6))))
+
+(defn- step-goats
+  "Keeps `max-goats` goats in the mountains while the player is there and moves them.
+  An angry goat that touches the player butts them back through the air."
+  [{:keys [realm player goats] :as st} dt]
+  (if (not= realm :mountains)
+    st
+    (let [tiles (get-in st [:worlds :mountains :tiles])
+          px (+ (:x player) (/ player-w 2))
+          new (when (< (count goats) max-goats) (spawn-goat tiles px))
+          goats (cond-> (mapv #(step-goat tiles % player dt) (or goats []))
+                  new (conj new))
+          butt (when (<= (:hurt player 0) 0)
+                 (some (fn [[i g]] (when (and (:angry? g) (zero? (:knock g)) (touching? player g)) i))
+                       (map-indexed vector goats)))]
+      (if butt
+        (let [g (get goats butt)
+              side (if (< px (+ (:x g) (/ goat-w 2))) -1 1)]
+          (-> st
+              (assoc :goats goats)
+              (update-in [:goats butt] assoc :knock 40 :vx (* side -3) :vy -3)
+              (tally :butted 1)
+              ;; a butt does no harm but sends the player flying a long way
+              (update :player assoc :vx (* side 7) :vy -10 :hurt 50 :climbing? false :flung? true :ground? false)
+              (update :popups conj {:text "Bonk!" :x px :y (- (:y player) 10) :life 70})))
+        (assoc st :goats goats)))))
+
+(defn- strike-goat
+  "Hits the nearest goat in front of the pickaxe and within reach, which makes it
+  angry. Returns nil when the pickaxe reaches none and `:hit` otherwise."
+  [state]
+  (let [{:keys [player goats realm]} @state
+        px (+ (:x player) (/ player-w 2))
+        [hx hy] (hand player)
+        [ax ay] (or (:aim-at player) [(+ hx (:facing player)) hy])
+        ad (max 0.001 (js/Math.hypot (- ax hx) (- ay hy)))
+        dist (fn [{:keys [x y]}]
+               (let [cx (- (+ x (/ goat-w 2)) hx)
+                     cy (- (+ y (/ goat-h 2)) hy)
+                     d (js/Math.hypot cx cy)]
+                 (when (and (<= d (+ reach 14))
+                            (or (< d 26)
+                                (> (/ (+ (* cx (- ax hx)) (* cy (- ay hy))) (* d ad)) 0.55)))
+                   d)))
+        i (when (= realm :mountains)
+            (some->> (keep-indexed (fn [i g] (when-let [d (dist g)] [d i])) goats)
+                     seq (apply min-key first) second))]
+    (when i
+      (let [{:keys [x y angry?]} (get goats i)]
+        (swap! state #(cond-> (update-in % [:goats i] assoc :angry? true :flash 8 :knock 12 :graze 0
+                                         :vx (if (< (+ x (/ goat-w 2)) px) -3 3) :vy -2.5)
+                        (not angry?)
+                        (update :popups conj {:text "Baa!" :x (+ x (/ goat-w 2)) :y (- y 8) :life 70})))
+        :hit))))
+
+(defn- calm-goat
+  "Feeds hay to the nearest angry goat within `goat-calm-reach` of the player, which
+  calms it, or returns nil when no angry goat is that close."
+  [{:keys [player goats realm] :as st}]
+  (let [px (+ (:x player) (/ player-w 2))
+        py (+ (:y player) (/ player-h 2))
+        dist (fn [{:keys [x y]}] (js/Math.hypot (- (+ x (/ goat-w 2)) px) (- (+ y (/ goat-h 2)) py)))
+        i (when (= realm :mountains)
+            (some->> (keep-indexed (fn [i g] (when (and (:angry? g) (<= (dist g) goat-calm-reach)) [(dist g) i])) goats)
+                     seq (apply min-key first) second))]
+    (when i
+      (let [{:keys [x y]} (get goats i)]
+        (-> st
+            (update-in [:goats i] assoc :angry? false :graze 150 :knock 0)
+            (tally :calmed 1)
+            (update :particles into (for [k (range 8)]
+                                      {:x (+ x (* goat-w (js/Math.random))) :y (+ y (* 6 (js/Math.random)))
+                                       :vx (- (* 2 (js/Math.random)) 1) :vy (- (* -2 (js/Math.random)) 1)
+                                       :life (+ 25 (* 20 (js/Math.random))) :color "#ff7aa8" :i k}))
+            (update :popups conj {:text "Munch! The goat calms down" :x (+ x (/ goat-w 2)) :y (- y 8) :life 100}))))))
+
+(defn- draw-goat
+  "Draws goat `g` as a white goat with curved horns and a beard, with a red anger
+  mark over its head while it is angry."
+  [^js ctx {:keys [x y dir vx ground? walked flash angry? graze]} clock cam-x cam-y]
+  (let [sx (js/Math.round (- x cam-x))
+        sy (js/Math.round (- y cam-y))
+        moving? (and ground? (> (js/Math.abs vx) 0.3))
+        swing (if moving? (js/Math.round (* 2 (js/Math.sin (/ walked 4)))) 0)
+        ;; a grazing goat lowers its head to the grass
+        dip (if (and (pos? graze) (not angry?)) 5 0)
+        rect (fn [color rx ry rw rh]
+               (set! (.-fillStyle ctx) (if (pos? flash) "#ffd0d0" color))
+               (.fillRect ctx (if (pos? dir) (+ sx rx) (- (+ sx goat-w) rx rw)) (+ sy ry) rw rh))]
+    ;; legs
+    (rect "#d8d8d0" (+ 3 swing) 16 3 8)
+    (rect "#d8d8d0" (- 8 swing) 16 3 8)
+    (rect "#d8d8d0" (+ 15 swing) 16 3 8)
+    (rect "#d8d8d0" (- 19 swing) 16 3 8)
+    (rect "#3a3530" 3 22 19 2)
+    ;; body and tail
+    (rect "#f4f4ee" 1 7 22 11)
+    (rect "#e2e2da" 1 15 22 3)
+    (rect "#f4f4ee" -1 6 3 3)
+    ;; neck and head
+    (rect "#f4f4ee" 19 (+ 3 dip) 5 8)
+    (rect "#f4f4ee" 21 (+ 1 dip) 7 7)
+    (rect "#e8c0b0" 26 (+ 5 dip) 2 2)
+    (rect "#222222" 24 (+ 3 dip) 2 2)
+    ;; beard
+    (rect "#e2e2da" 23 (+ 8 dip) 3 4)
+    ;; curved horns sweeping back
+    (rect "#8a7a64" 21 (- dip 1) 3 2)
+    (rect "#8a7a64" 19 (- dip 2) 3 2)
+    (rect "#8a7a64" 18 dip 2 2)
+    (rect "#eedcc0" 26 (+ 1 dip) 2 2)
+    (when angry?
+      (let [bob (js/Math.round (* 2 (js/Math.sin (/ clock 120))))
+            mx (+ sx (/ goat-w 2) -5)
+            my (+ sy -14 bob)]
+        (set! (.-fillStyle ctx) "#e53935")
+        (doseq [[ax ay aw ah] [[0 0 3 4] [7 0 3 4] [0 6 3 4] [7 6 3 4] [3 3 4 1] [3 6 4 1]]]
+          (.fillRect ctx (+ mx ax) (+ my ay) aw ah))))))
+
+(defn- draw-goats [^js ctx goats clock cam-x cam-y]
+  (doseq [g goats] (draw-goat ctx g clock cam-x cam-y)))
+
 (defn- near-player?
   "Checks that the point `x`, `y` lies within `r` pixels of the player's middle."
   [{:keys [player]} x y r]
@@ -2580,7 +2798,7 @@
                     (some->> (:paperboy st) ((fn [b] (near-player? st (:x b) (:y b) (* 30 T))))))
                 (conj :paper)
                 (or (= :space realm) star-shop? (has? :star)) (conj :space)
-                (or (= :mountains realm) (has? :ore)) (conj :mountains))
+                (or (= :mountains realm) (has? :ore) (has? :hay)) (conj :mountains))
         seen  (or (:seen st) #{})]
     (if (every? seen found)
       st
@@ -3626,6 +3844,11 @@
         (spend painted 1)
         (popup st "Point at a Fluffy near you"))
 
+      (= :hay id)
+      (if-let [calmed (calm-goat st)]
+        (spend calmed 1)
+        (popup st (if (= :mountains (:realm st)) "No angry goat nearby" "Goats live in the mountains")))
+
       (= :torch id)
       (if (place-block! tiles player enemies torch)
         (spend st 1)
@@ -3746,7 +3969,9 @@
          ($ help-section {:title "The Mountains"}
             ($ :li "Walk on past the left or right end of the valley to reach the Mountains, and past either end of the Mountains to come back; the two lands join up in a ring")
             ($ :li "Jump up the steep slopes to the snowy peaks; the mini-map shows the Mountains while you are there")
-            ($ :li "Rust-spotted rock deep inside the mountains is iron ore; dig it for Iron Ore and sell it at the shop for " (prices :ore) " coins each")))
+            ($ :li "Rust-spotted rock deep inside the mountains is iron ore; dig it for Iron Ore and sell it at the shop for " (prices :ore) " coins each")
+            ($ :li "White mountain goats wander the slopes and leave you be, but hit one with the pickaxe and it gets angry and butts you, sending you flying a long way")
+            ($ :li "Golden tufts of hay grow on the grass in the valley and down in the mountain valleys; hit one with the pickaxe to pick it, then use Hay from the bag near an angry goat to calm it")))
        (when (seen :robbers)
          ($ help-section {:title "Robbers"}
             ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
@@ -4075,7 +4300,7 @@
 (def map-colors
   {grass [86 170 60] dirt [140 92 52] stone [118 118 128] trunk [110 72 40]
    leaves [52 140 60] rope [200 170 110] torch [255 170 60]
-   snow [238 243 248] ore [190 104 50]})
+   snow [238 243 248] ore [190 104 50] hay [224 192 96]})
 
 (defui mini-map
   "Draws the overworld, or the mountains while the player is there, one pixel per
@@ -4458,6 +4683,15 @@
                      (str "Our miner walked past the end of the valley into the Mountains and dug out "
                           (plural (:ore log 0) "lump" "lumps") " of iron ore. The smiths are delighted.")
                      "Our miner walked past the end of the valley into the Mountains. Locals say there is iron in that rock, if you dig deep enough.")})
+          (when (pos? (:calmed log 0))
+            {:score (+ 18 (* 3 (:butted log 0))) :pic {:icon :hay}
+             :title (p :goats ["GOAT CALMED WITH HAY" "PEACE RETURNS TO THE PEAKS" "MINER MAKES FRIENDS WITH GOAT"])
+             :text (str "An angry mountain goat"
+                        (when (pos? (:butted log 0)) (str ", which butted a miner " (plural (:butted log 0) "time" "times") ","))
+                        " was calmed down with a mouthful of hay. Goat experts advise keeping pickaxes to yourself.")})
+          (when (and (pos? (:butted log 0)) (zero? (:calmed log 0)))
+            {:score (* 6 (:butted log 0)) :pic {:icon :hay}
+             :title "GOAT BUTTS MINER" :text (str "A miner who poked a mountain goat with a pickaxe was butted " (plural (:butted log 0) "time" "times") ". The goat could not be reached for comment.")})
           (when (contains? visited :slime)
             {:score 15 :pic :slime
              :title "TRIP TO THE SLIME DIMENSION" :text "A portal opened and a miner stepped through into the green. They came back smelling faintly of ooze."})
@@ -4776,7 +5010,7 @@
                                  (flow-ooze! (:tiles world) levels @flips))
                              _ (step-enemies! state (:tiles world) (:surface world) light dt)
                              _ (step-boss! state (:tiles world) dt)
-                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt) (step-paper clock dt) discover))
+                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt) (step-goats dt) (step-paper clock dt) sow-old-hay discover))
                              _ (set-quest! (:quest @state))
                              _ (when (and (= :slime (:realm @state)) (:gate-open? @state)
                                           (touching? player (assoc (:gate world) :w gate-w :h gate-h)))
@@ -4846,6 +5080,8 @@
                                (draw-paperboy ctx b cam-x cam-y (paperboy-label @state))))
                            (when space?
                              (draw-ship ctx (get-in @state [:worlds :space :ship]) t cam-x cam-y))
+                           (when (= :mountains (:realm @state))
+                             (draw-goats ctx (:goats @state) clock cam-x cam-y))
                            (draw-houses ctx (:houses @state) (:realm @state) cam-x cam-y)
                            (draw-mirrors ctx (:mirrors @state) (:realm @state) player space? cam-x cam-y)
                            (draw-fluffies ctx (:fluffies @state) (:realm @state) clock cam-x cam-y)

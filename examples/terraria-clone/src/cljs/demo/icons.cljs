@@ -86,6 +86,17 @@
                 "osrrdddrdo"
                 ".oddddddo."
                 "..oooooo.."]}
+   :hay {:palette {\y "#e0c060" \l "#f2dc8a" \d "#a8862e" \b "#c0392b"}
+         :rows ["..l...l..."
+                ".lyl.lyl.."
+                "..yd.yd.l."
+                "..yd.yd.y."
+                ".dyyyyyyd."
+                ".dyyyyyyd."
+                ".bbbbbbbb."
+                ".dyyyyyyd."
+                "..ydyydy.."
+                "..d.d.d..."]}
    :torch {:palette {\y "#ffd54a" \r "#ff7a1a" \c "#fff6c0" \w "#8a5a2b" \d "#5a3418"}
            :rows ["....r....."
                   "...ryr...."
