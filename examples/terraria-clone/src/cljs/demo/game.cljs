@@ -472,11 +472,11 @@
         head-out? (not (ooze-at? tiles cx (+ (:y p) 6)))
         vx (if flung?
              (:vx p)
-             (+ (:vx p) (* (- (* dir run-v (if wet? 0.5 1)) (:vx p)) (min 1 (* 0.25 dt)))))
+             (+ (:vx p) (* (- (* dir run-v (:run p 1) (if wet? 0.5 1)) (:vx p)) (min 1 (* 0.25 dt)))))
         vy (cond
              (and wet? jump? head-out?) (* 0.8 jump-v)
              (and wet? jump?) (max -2.6 (- (:vy p) (* 0.5 dt)))
-             (and jump? (:ground? p)) jump-v
+             (and jump? (:ground? p)) (* jump-v (:leap p 1))
              ;; letting go of Space early gives a shorter jump
              (and (not jump?) (not flung?) (< (:vy p) -3)) -3
              :else (:vy p))
@@ -2608,6 +2608,8 @@
 (def goat-h 24)
 (def max-goats 4)
 (def goat-calm-reach (* 5 T))
+(def goat-mount-reach (* 3 T))
+(def ride-frames 600)
 
 (defn- spawn-goat
   "Returns a calm goat standing on the ground at a random column at least 30 tiles
@@ -2653,17 +2655,69 @@
       ;; and now and then hop for the fun of it
       (and ground? (not blocked?) (not grazing?) (< (js/Math.random) (* 0.004 dt))) (assoc :vy -6))))
 
+(defn- end-ride
+  "Ends the ride: the goat bucks the player off with a hop and is an ordinary calm
+  goat again."
+  [{:keys [riding player] :as st}]
+  (let [i (:i riding)]
+    (-> st
+        (dissoc :riding)
+        (cond-> (get-in st [:goats i]) (update-in [:goats i] assoc :friendly? false :ridden? false :knock 30
+                                                  :vx (* -2 (:facing player 1)) :vy -3))
+        (update :player #(cond-> (dissoc % :run :leap)
+                           (not (:flung? %)) (assoc :vy -6 :ground? false)))
+        (cond-> (= :mountains (:realm st))
+          (update :popups conj {:text "The goat bucks you off!" :x (+ (:x player) (/ player-w 2))
+                                :y (- (:y player) 20) :life 90})))))
+
+(defn mount-goat
+  "Climbs onto the nearest friendly goat within `goat-mount-reach`, or returns nil."
+  [{:keys [player goats realm riding] :as st}]
+  (let [px (+ (:x player) (/ player-w 2))
+        py (+ (:y player) player-h)
+        dist (fn [{:keys [x y]}] (js/Math.hypot (- (+ x (/ goat-w 2)) px) (- (+ y goat-h) py)))
+        i (when (and (= realm :mountains) (not riding))
+            (some->> (keep-indexed (fn [i g] (when (and (:friendly? g) (<= (dist g) goat-mount-reach)) [(dist g) i])) goats)
+                     seq (apply min-key first) second))]
+    (when i
+      (let [{:keys [x y]} (get goats i)
+            nx (- (+ x (/ goat-w 2)) (/ player-w 2))
+            ny (- (+ y goat-h) player-h)
+            tiles (get-in st [:worlds :mountains :tiles])]
+        (-> st
+            (assoc :riding {:i i :left ride-frames})
+            (update-in [:goats i] assoc :ridden? true :graze 0)
+            (update :player assoc :run 1.6 :leap 1.25 :climbing? false :vx 0
+                    :x (if (box-hits? tiles nx ny player-w player-h) (:x player) nx))
+            (tally :rides 1))))))
+
 (defn- step-goats
   "Keeps `max-goats` goats in the mountains while the player is there and moves them.
   An angry goat that touches the player butts them back through the air."
-  [{:keys [realm player goats] :as st} dt]
-  (if (not= realm :mountains)
+  [{:keys [realm player goats riding] :as st} dt]
+  (cond
+    (and riding (or (not= realm :mountains) (<= (:left riding) 0) (:flung? player)))
+    (end-ride st)
+
+    (not= realm :mountains)
     st
+
+    :else
     (let [tiles (get-in st [:worlds :mountains :tiles])
           px (+ (:x player) (/ player-w 2))
           new (when (< (count goats) max-goats) (spawn-goat tiles px))
-          goats (cond-> (mapv #(step-goat tiles % player dt) (or goats []))
+          ridden (:i riding)
+          goats (cond-> (into [] (map-indexed (fn [i g]
+                                                (if (= i ridden)
+                                                  ;; the ridden goat carries the player
+                                                  (assoc g :x (- px (/ goat-w 2)) :y (- (+ (:y player) player-h) goat-h)
+                                                         :vx (:vx player) :dir (:facing player) :ground? (:ground? player)
+                                                         :graze 0 :angry? false
+                                                         :walked (+ (:walked g 0) (js/Math.abs (* (:vx player) dt))))
+                                                  (step-goat tiles g player dt))))
+                              (or goats []))
                   new (conj new))
+          st (cond-> st riding (update-in [:riding :left] - dt))
           butt (when (<= (:hurt player 0) 0)
                  (some (fn [[i g]] (when (and (:angry? g) (zero? (:knock g)) (touching? player g)) i))
                        (map-indexed vector goats)))]
@@ -2697,11 +2751,11 @@
                                 (> (/ (+ (* cx (- ax hx)) (* cy (- ay hy))) (* d ad)) 0.55)))
                    d)))
         i (when (= realm :mountains)
-            (some->> (keep-indexed (fn [i g] (when-let [d (dist g)] [d i])) goats)
+            (some->> (keep-indexed (fn [i g] (when-not (:ridden? g) (when-let [d (dist g)] [d i]))) goats)
                      seq (apply min-key first) second))]
     (when i
       (let [{:keys [x y angry?]} (get goats i)]
-        (swap! state #(cond-> (update-in % [:goats i] assoc :angry? true :flash 8 :knock 12 :graze 0
+        (swap! state #(cond-> (update-in % [:goats i] assoc :angry? true :friendly? false :flash 8 :knock 12 :graze 0
                                          :vx (if (< (+ x (/ goat-w 2)) px) -3 3) :vy -2.5)
                         (not angry?)
                         (update :popups conj {:text "Baa!" :x (+ x (/ goat-w 2)) :y (- y 8) :life 70})))
@@ -2709,15 +2763,16 @@
 
 (defn- calm-goat
   "Feeds hay to the nearest angry goat within `goat-calm-reach` of the player, which
-  calms it, or returns nil when no angry goat is that close."
-  [{:keys [player goats realm] :as st}]
+  calms it, or else to the nearest calm one, which becomes friendly and lets the
+  player ride it. Returns nil when no goat that wants hay is that close."
+  [{:keys [player goats realm riding] :as st}]
   (let [px (+ (:x player) (/ player-w 2))
         py (+ (:y player) (/ player-h 2))
         dist (fn [{:keys [x y]}] (js/Math.hypot (- (+ x (/ goat-w 2)) px) (- (+ y (/ goat-h 2)) py)))
         i (when (= realm :mountains)
             (some->> (keep-indexed (fn [i g] (when (and (:angry? g) (<= (dist g) goat-calm-reach)) [(dist g) i])) goats)
                      seq (apply min-key first) second))]
-    (when i
+    (if i
       (let [{:keys [x y]} (get goats i)]
         (-> st
             (update-in [:goats i] assoc :angry? false :graze 150 :knock 0)
@@ -2726,7 +2781,21 @@
                                       {:x (+ x (* goat-w (js/Math.random))) :y (+ y (* 6 (js/Math.random)))
                                        :vx (- (* 2 (js/Math.random)) 1) :vy (- (* -2 (js/Math.random)) 1)
                                        :life (+ 25 (* 20 (js/Math.random))) :color "#ff7aa8" :i k}))
-            (update :popups conj {:text "Munch! The goat calms down" :x (+ x (/ goat-w 2)) :y (- y 8) :life 100}))))))
+            (update :popups conj {:text "Munch! The goat calms down" :x (+ x (/ goat-w 2)) :y (- y 8) :life 100})))
+      (when-let [i (when (= realm :mountains)
+                     (some->> (keep-indexed (fn [i g] (when (and (not (:angry? g)) (not (:friendly? g)) (not= i (:i riding))
+                                                                 (<= (dist g) goat-calm-reach))
+                                                        [(dist g) i]))
+                                            goats)
+                              seq (apply min-key first) second))]
+        (let [{:keys [x y]} (get goats i)]
+          (-> st
+              (update-in [:goats i] assoc :friendly? true :graze 200)
+              (update :particles into (for [k (range 8)]
+                                        {:x (+ x (* goat-w (js/Math.random))) :y (+ y (* 6 (js/Math.random)))
+                                         :vx (- (* 2 (js/Math.random)) 1) :vy (- (* -2 (js/Math.random)) 1)
+                                         :life (+ 25 (* 20 (js/Math.random))) :color "#ff7aa8" :i k}))
+              (update :popups conj {:text "The goat likes you! Press E to ride" :x (+ x (/ goat-w 2)) :y (- y 8) :life 120})))))))
 
 (defn- draw-goat
   "Draws goat `g` as a white goat with curved horns and a beard, with a red anger
@@ -2773,6 +2842,48 @@
 
 (defn- draw-goats [^js ctx goats clock cam-x cam-y]
   (doseq [g goats] (draw-goat ctx g clock cam-x cam-y)))
+
+(defn- draw-heart [^js ctx cx top]
+  (set! (.-fillStyle ctx) "#ffffff")
+  (doseq [[x y w h] [[-6 1 12 5] [-5 0 4 1] [1 0 4 1] [-4 6 8 2] [-2 8 4 2]]]
+    (.fillRect ctx (+ cx x) (+ top y -1) w (+ h 2)))
+  (set! (.-fillStyle ctx) "#ff5c8a")
+  (doseq [[x y w h] [[-5 1 10 4] [-4 0 3 1] [1 0 3 1] [-3 5 6 2] [-1 7 2 2]]]
+    (.fillRect ctx (+ cx x) (+ top y) w h))
+  (set! (.-fillStyle ctx) "#ffc2d4")
+  (.fillRect ctx (- cx 4) (+ top 1) 2 2))
+
+(defn- draw-goat-marks
+  "Draws a pink heart over each friendly goat, with \"E: Ride\" beside it when the player
+  is close enough to climb on, and over a ridden goat's rider a heart with a bar of
+  the ride time left."
+  [^js ctx {:keys [goats player riding]} clock cam-x cam-y]
+  (let [bob (js/Math.round (* 1.5 (js/Math.sin (/ clock 200))))
+        px (+ (:x player) (/ player-w 2))
+        py (+ (:y player) player-h)]
+    (doseq [[i {:keys [x y friendly?]}] (map-indexed vector goats)
+            :when friendly?]
+      (let [cx (js/Math.round (- (+ x (/ goat-w 2)) cam-x))]
+        (if (= i (:i riding))
+          (let [top (js/Math.round (- (:y player) cam-y 34))
+                frac (max 0 (/ (:left riding) ride-frames))]
+            (draw-heart ctx cx (+ top bob))
+            (set! (.-fillStyle ctx) "rgba(0,0,0,0.55)")
+            (.fillRect ctx (- cx 14) (+ top 13) 28 5)
+            (set! (.-fillStyle ctx) "#ff5c8a")
+            (.fillRect ctx (- cx 13) (+ top 14) (js/Math.round (* 26 frac)) 3))
+          (let [top (js/Math.round (- y cam-y 14))]
+            (draw-heart ctx cx (+ top bob))
+            (when (and (not riding)
+                       (<= (js/Math.hypot (- (+ x (/ goat-w 2)) px) (- (+ y goat-h) py)) goat-mount-reach))
+              (.save ctx)
+              (set! (.-font ctx) "bold 12px system-ui, sans-serif")
+              (set! (.-textAlign ctx) "left")
+              (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+              (.fillRect ctx (+ cx 9) (+ top -2) 48 15)
+              (set! (.-fillStyle ctx) "#ffffff")
+              (.fillText ctx "E: Ride" (+ cx 13) (+ top 10))
+              (.restore ctx))))))))
 
 (defn- near-player?
   "Checks that the point `x`, `y` lies within `r` pixels of the player's middle."
@@ -3847,7 +3958,7 @@
       (= :hay id)
       (if-let [calmed (calm-goat st)]
         (spend calmed 1)
-        (popup st (if (= :mountains (:realm st)) "No angry goat nearby" "Goats live in the mountains")))
+        (popup st (if (= :mountains (:realm st)) "No goat nearby wants hay" "Goats live in the mountains")))
 
       (= :torch id)
       (if (place-block! tiles player enemies torch)
@@ -3971,7 +4082,8 @@
             ($ :li "Jump up the steep slopes to the snowy peaks; the mini-map shows the Mountains while you are there")
             ($ :li "Rust-spotted rock deep inside the mountains is iron ore; dig it for Iron Ore and sell it at the shop for " (prices :ore) " coins each")
             ($ :li "White mountain goats wander the slopes and leave you be, but hit one with the pickaxe and it gets angry and butts you, sending you flying a long way")
-            ($ :li "Golden tufts of hay grow on the grass in the valley and down in the mountain valleys; hit one with the pickaxe to pick it, then use Hay from the bag near an angry goat to calm it")))
+            ($ :li "Golden tufts of hay grow on the grass in the valley and down in the mountain valleys; hit one with the pickaxe to pick it, then use Hay from the bag near an angry goat to calm it")
+            ($ :li "Hay given to a calm goat makes it friendly, with a pink heart over it; press E next to it to ride it for about ten seconds, steering with A and D and leaping high with Space, until it bucks you off")))
        (when (seen :robbers)
          ($ help-section {:title "Robbers"}
             ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
@@ -4847,7 +4959,7 @@
         on-press-e (fn []
                      (when-let [state @state-ref]
                        (when-not (:paused? @state)
-                         (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (toggle-fluffy %))))))
+                         (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (mount-goat %) (toggle-fluffy %))))))
         on-use-slot (fn [i]
                       (when-let [state @state-ref]
                         (when-not (:paused? @state)
@@ -4904,7 +5016,7 @@
                          (case (.-code e)
                            "KeyM" (when-not (.-repeat e) (set-menu! not))
                            "KeyE" (when-not (or (.-repeat e) (:paused? @state))
-                                    (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (toggle-fluffy %))))
+                                    (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (mount-goat %) (toggle-fluffy %))))
                            ("Digit1" "Digit2" "Digit3" "Digit4" "Digit5" "Digit6" "Digit7" "Digit8" "Digit9" "Digit0")
                            (when-not (or (.-repeat e) (:paused? @state))
                                                              ;; Digit0 is the tenth slot
@@ -5087,8 +5199,11 @@
                            (draw-fluffies ctx (:fluffies @state) (:realm @state) clock cam-x cam-y)
                            (draw-house-rims ctx (:houses @state) (:realm @state) cam-x cam-y)
                            (when (even? (js/Math.floor (/ (:hurt player 0) 4)))
-                             (draw-player ctx player cam-x cam-y space?)
-                             (draw-pickaxe ctx player cam-x cam-y))
+                             (let [cam-y (if (:riding @state) (+ cam-y 12) cam-y)]
+                               (draw-player ctx player cam-x cam-y space?)
+                               (draw-pickaxe ctx player cam-x cam-y)))
+                           (when (= :mountains (:realm @state))
+                             (draw-goat-marks ctx @state clock cam-x cam-y))
                            (when-let [levels (:levels world)]
                              (draw-ooze ctx (:tiles world) levels vw vh cam-x cam-y t))
                            (draw-rockets ctx (:rockets @state) cam-x cam-y)
