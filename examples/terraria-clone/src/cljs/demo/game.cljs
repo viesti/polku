@@ -22,6 +22,8 @@
 (def slimestone 8)
 (def torch 9)
 (def asteroid 10)
+(def snow 11)
+(def ore 12)
 (def rope-len 10)
 
 (def blocks
@@ -29,6 +31,8 @@
    :stone {:id :stone :name "Stone" :icon "🪨" :tile stone}})
 
 (def stack-max {:dirt 100 :stone 100})
+
+(def ore-item {:id :ore :name "Iron Ore" :icon "🪨"})
 (def climb-v 2.2)
 
 (def player-w 18)
@@ -70,7 +74,7 @@
     (>= y H) stone
     :else (aget tiles (idx x y))))
 
-(defn- solid? [t] (or (<= grass t stone) (= t slimestone) (= t asteroid)))
+(defn- solid? [t] (or (<= grass t stone) (= t slimestone) (= t asteroid) (= t snow) (= t ore)))
 
 (defn- surface-height [x]
   (js/Math.floor (+ (* H 0.32)
@@ -148,7 +152,7 @@
 (def shop-h 5)
 
 (def prices
-  {:torch 5 :rope 5 :star 15 :bar 10 :potion 10 :ruby 50 :mirror 40})
+  {:torch 5 :rope 5 :star 15 :bar 10 :potion 10 :ruby 50 :mirror 40 :ore 8})
 
 (defn- place-shop!
   "Levels the ground under a shop at a random surface spot away from the spawn point
@@ -197,6 +201,66 @@
           (recur (inc x) (if plant? x last)))))
     (let [shop (place-shop! tiles surface)]
       {:tiles tiles :surface surface :shop shop :chests (place-chests tiles surface)})))
+
+;; the mountains: peaks rise to `peak-top`, valleys sink to `valley-floor`, and the
+;; ground climbs at most `max-climb` tiles a column so a jump gets over every slope
+(def peak-top 10)
+(def valley-floor 66)
+(def max-climb 2)
+(def edge-ground 40)
+(def snow-line 30)
+
+(defn- mountain-height
+  "Returns the surface row of column `x` in the mountains before slopes are limited:
+  sharp ridged peaks, flattening out to `edge-ground` at both ends of the world."
+  [x]
+  (let [ridge (fn [n] (- 1 (js/Math.abs (- (* 2 n) 1))))
+        r (+ (* 0.75 (js/Math.pow (ridge (noise2 (/ x 38) 61.5)) 1.6))
+             (* 0.25 (ridge (noise2 (/ x 11) 67.5))))
+        raw (- valley-floor (* r (- valley-floor peak-top)))
+        edge (min 1 (/ (min x (- W 1 x)) 30))]
+    (js/Math.floor (+ (* edge raw) (* (- 1 edge) edge-ground)))))
+
+(defn- iron-vein? [x y]
+  (and (> (noise2 (/ x 70) 91.5) 0.45)
+       (> (+ (noise2 (/ x 4) (+ 800 (/ y 3))) (* 0.0015 y)) 0.84)))
+
+(defn generate-mountains
+  "Builds the mountains: high rocky peaks with snowy tops, deep valleys with grass and
+  trees, caves and chests, and veins of iron ore in parts of the rock."
+  []
+  (let [tiles (js/Uint8Array. (* W H))
+        surface (js/Int32Array. W)]
+    (doseq [x (range W)]
+      (aset surface x (mountain-height x)))
+    ;; limit the climb from either side
+    (doseq [x (range 1 W)]
+      (aset surface x (max (aget surface x) (- (aget surface (dec x)) max-climb))))
+    (doseq [x (range (- W 2) -1 -1)]
+      (aset surface x (max (aget surface x) (- (aget surface (inc x)) max-climb))))
+    (doseq [x (range W)]
+      (let [s (aget surface x)
+            snowy? (< s snow-line)
+            soil (if snowy? 1 (+ 2 (js/Math.floor (* 3 (noise2 (/ x 8) 23.5)))))]
+        (doseq [y (range s H)]
+          (aset tiles (idx x y)
+                (cond
+                  (and (> y (+ s 7)) (< y (- H 2)) (cave? (+ x 1000) y)) air
+                  (and snowy? (< y (+ s 2))) snow
+                  (= y s) grass
+                  (< y (+ s soil)) dirt
+                  (and (> y (+ s 5)) (iron-vein? x y)) ore
+                  :else stone)))))
+    (loop [x 8 last -10]
+      (when (< x (- W 8))
+        (let [s (aget surface x)
+              plant? (and (> (- x last) 6)
+                          (> s 44)
+                          (< (hash2 x 142) 0.2)
+                          (= grass (aget tiles (idx x s))))]
+          (when plant? (plant-tree! tiles x s))
+          (recur (inc x) (if plant? x last)))))
+    {:tiles tiles :surface surface :chests (place-chests tiles surface)}))
 
 (def portal-w 26)
 (def portal-h 44)
@@ -455,7 +519,9 @@
    rope ["#c8a165" "#8a6a3a"]
    slimestone ["#56705f" "#4e6757"]
    torch ["#ffb347" "#8a5a2b"]
-   asteroid ["#6e6478" "#635a6c"]})
+   asteroid ["#6e6478" "#635a6c"]
+   snow ["#eef3f8" "#e3eaf1"]
+   ore ["#75706f" "#6b6665"]})
 
 (defn- hand [{:keys [x y]}]
   [(+ x (/ player-w 2)) (+ y 22)])
@@ -578,15 +644,17 @@
             torches (count (filter (fn [[tx ty]] (= torch (aget tiles (idx tx ty)))) hits))
             dug (into [] (keep (fn [[tx ty]]
                                  (let [t (aget tiles (idx tx ty))]
-                                   (cond (or (= t grass) (= t dirt)) :dirt
-                                         (or (= t stone) (= t slimestone) (= t asteroid)) :stone))))
+                                   (cond (or (= t grass) (= t dirt) (= t snow)) :dirt
+                                         (or (= t stone) (= t slimestone) (= t asteroid)) :stone
+                                         (= t ore) :ore))))
                       hits)]
         (doseq [[tx ty] hits]
           (aset tiles (idx tx ty) air))
         (swap! state #(cond-> (-> %
-                                  (stash (map (fn [[id n]] (assoc (dissoc (blocks id) :tile) :count n))
+                                  (stash (map (fn [[id n]] (assoc (dissoc (or (blocks id) ore-item) :tile) :count n))
                                               (frequencies dug)))
                                   (tally :dug (count dug))
+                                  (tally :ore (count (filter #{:ore} dug)))
                                   (assoc-in [:player :swing] swing-frames)
                                   (assoc-in [:player :facing]
                                             (if (< (first (:aim-at player)) (first (hand player))) -1 1))
@@ -709,6 +777,41 @@
     (.closePath ctx)
     (.fill ctx)))
 
+(defn- draw-peaks
+  "Draws two ranges of far-off mountains with snowy tops behind the mountains realm,
+  moving slower than the ground so they look distant."
+  [^js ctx vw vh cam-x cam-y]
+  (doseq [[par rock snow amp base k] [[0.12 "#a7b4c6" "#eef2f7" 260 0.36 0] [0.3 "#8494a9" "#e3e9f0" 200 0.44 1]]]
+    (let [step 12
+          height (fn [sx]
+                   (let [wx (+ sx (* cam-x par))
+                         n (noise2 (/ wx 260) (+ 40 (* 10 k)))
+                         ridge (- 1 (js/Math.abs (- (* 2 n) 1)))]
+                     (- (* H T base) (* amp ridge ridge) cam-y)))
+          xs (range 0 (+ vw step) step)
+          ys (mapv height xs)]
+      (set! (.-fillStyle ctx) rock)
+      (.beginPath ctx)
+      (.moveTo ctx 0 vh)
+      (doseq [[sx hy] (map vector xs ys)] (.lineTo ctx sx hy))
+      (.lineTo ctx vw vh)
+      (.closePath ctx)
+      (.fill ctx)
+      ;; snow on whatever rises above the snow line of this range
+      (let [line (- (* H T base) (* amp 0.55) cam-y)]
+        (.save ctx)
+        (.beginPath ctx)
+        (.rect ctx 0 -10000 vw (+ 10000 line))
+        (.clip ctx)
+        (set! (.-fillStyle ctx) snow)
+        (.beginPath ctx)
+        (.moveTo ctx 0 vh)
+        (doseq [[sx hy] (map vector xs ys)] (.lineTo ctx sx hy))
+        (.lineTo ctx vw vh)
+        (.closePath ctx)
+        (.fill ctx)
+        (.restore ctx)))))
+
 (defn- paint-tile!
   "Draws tile (`tx`, `ty`) with its top left corner at (`sx`, `sy`)."
   [^js ctx ^js tiles ^js surface tx ty sx sy]
@@ -762,6 +865,19 @@
               (when (< (hash2 tx (+ ty 500)) 0.35)
                 (set! (.-fillStyle ctx) "#5f9a4a")
                 (.fillRect ctx (+ sx 2) (+ sy 3) 6 3))
+              (= t snow)
+              (when (< (hash2 tx (+ ty 500)) 0.3)
+                (set! (.-fillStyle ctx) "#ffffff")
+                (.fillRect ctx (+ sx 3) (+ sy 3) 5 2))
+              (= t ore)
+              (do (set! (.-fillStyle ctx) "#b5652e")
+                  (.fillRect ctx (+ sx 2) (+ sy 3) 4 3)
+                  (.fillRect ctx (+ sx 9) (+ sy 8) 4 4)
+                  (set! (.-fillStyle ctx) "#d98a4a")
+                  (.fillRect ctx (+ sx 2) (+ sy 3) 2 1)
+                  (.fillRect ctx (+ sx 9) (+ sy 8) 2 1)
+                  (set! (.-fillStyle ctx) "#8a4520")
+                  (.fillRect ctx (+ sx 4) (+ sy 12) 3 2))
               (= t asteroid)
               (when (< (hash2 tx (+ ty 500)) 0.4)
                 (set! (.-fillStyle ctx) "#4a4252")
@@ -960,8 +1076,8 @@
             (recur (inc tx))))
         (recur (inc ty))))))
 
-(defn- draw-depth [^js ctx ^js surface vw vh cam-y]
-  (let [top (- (* T (+ 14 (aget surface (quot W 2)))) cam-y)
+(defn- draw-depth [^js ctx row vw vh cam-y]
+  (let [top (- (* T (+ 14 row)) cam-y)
         bot (- (* T H) cam-y)
         g (.createLinearGradient ctx 0 top 0 bot)]
     (.addColorStop g 0 "rgba(0,0,0,0)")
@@ -1454,6 +1570,36 @@
         (merge there)
         (update-in [:today :visited] (fnil conj #{}) to)
         (assoc :realm to :particles [] :popups [] :rockets [] :spawn-in 0))))
+
+(defn- ground-y
+  "Returns the y at which a player standing over tile columns `x0` to `x1` lands on
+  the highest solid tile."
+  [tiles x0 x1]
+  (let [ty (or (some (fn [ty] (when (some #(solid? (tile-at tiles % ty)) (range x0 (inc x1))) ty))
+                     (range 0 H))
+               H)]
+    (- (* T ty) player-h 0.5)))
+
+(defn cross-edge
+  "Walking on past the left or right end of the overworld leads into the mountains,
+  and past either end of the mountains back to the overworld, as if the two were one
+  ring: going left comes in at the right end of the other realm and going right at
+  its left end."
+  [{:keys [realm player keys] :as st}]
+  (let [{:keys [x]} player
+        left? (and (keys "KeyA") (<= x 0.5))
+        right? (and (keys "KeyD") (>= (+ x player-w) (- (* W T) 0.5)))]
+    (if (and (#{:overworld :mountains} realm) (or left? right?))
+      (let [to (if (= realm :overworld) :mountains :overworld)
+            st (cond-> st
+                 (not (get-in st [:worlds :mountains])) (assoc-in [:worlds :mountains] (generate-mountains)))
+            st (switch-realm st to)
+            tiles (get-in st [:worlds to :tiles])
+            nx (if left? (- (* W T) T player-w) T)
+            tx0 (js/Math.floor (/ nx T))
+            tx1 (js/Math.floor (/ (+ nx player-w -0.01) T))]
+        (update st :player assoc :x nx :y (ground-y tiles tx0 tx1) :vy 0 :climbing? false))
+      st)))
 
 (declare leave-arena)
 
@@ -2433,7 +2579,8 @@
                 (or (:paper st)
                     (some->> (:paperboy st) ((fn [b] (near-player? st (:x b) (:y b) (* 30 T))))))
                 (conj :paper)
-                (or (= :space realm) star-shop? (has? :star)) (conj :space))
+                (or (= :space realm) star-shop? (has? :star)) (conj :space)
+                (or (= :mountains realm) (has? :ore)) (conj :mountains))
         seen  (or (:seen st) #{})]
     (if (every? seen found)
       st
@@ -3595,6 +3742,11 @@
          ($ help-section {:title "The newspaper"}
             ($ :li "Every morning a paperboy in a red cap walks the surface; press E next to him to buy The Mine Valley Times for " paper-price " coins")
             ($ :li "The paper tells what you got up to the day before; once bought, the newspaper button in the bottom right corner opens it again")))
+       (when (seen :mountains)
+         ($ help-section {:title "The Mountains"}
+            ($ :li "Walk on past the left or right end of the valley to reach the Mountains, and past either end of the Mountains to come back; the two lands join up in a ring")
+            ($ :li "Jump up the steep slopes to the snowy peaks; the mini-map shows the Mountains while you are there")
+            ($ :li "Rust-spotted rock deep inside the mountains is iron ore; dig it for Iron Ore and sell it at the shop for " (prices :ore) " coins each")))
        (when (seen :robbers)
          ($ help-section {:title "Robbers"}
             ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
@@ -3922,21 +4074,27 @@
 
 (def map-colors
   {grass [86 170 60] dirt [140 92 52] stone [118 118 128] trunk [110 72 40]
-   leaves [52 140 60] rope [200 170 110] torch [255 170 60]})
+   leaves [52 140 60] rope [200 170 110] torch [255 170 60]
+   snow [238 243 248] ore [190 104 50]})
 
 (defui mini-map
-  "Draws the overworld one pixel per tile, refreshed twice a second, with every
-  Fluffy in the overworld as a dot of its colour, the spaceship as a silver dot and the
-  player as a white dot."
+  "Draws the overworld, or the mountains while the player is there, one pixel per
+  tile, refreshed twice a second, with every Fluffy there as a dot of its colour, the
+  spaceship as a silver dot and the player as a white dot."
   [{:keys [state-ref]}]
-  (let [canvas-ref (use-ref nil)]
+  (let [canvas-ref (use-ref nil)
+        [shown set-shown!] (use-state :overworld)]
     (use-effect
      (fn []
        (let [draw (fn []
                     (when-let [^js canvas @canvas-ref]
                       (when-let [state @state-ref]
                         (let [st @state
-                              {:keys [tiles surface]} (get-in st [:worlds :overworld])
+                              ;; in the mountains the map shows the mountains
+                              shown (if (and (= :mountains (:realm st)) (get-in st [:worlds :mountains]))
+                                      :mountains :overworld)
+                              _ (set-shown! shown)
+                              {:keys [tiles surface]} (get-in st [:worlds shown])
                               ctx (.getContext canvas "2d")
                               img (.createImageData ctx W H)
                               ^js px (.-data img)
@@ -3956,13 +4114,13 @@
                                 (aset px (+ i 2) b)
                                 (aset px (+ i 3) 255))))
                           (.putImageData ctx img 0 0)
-                          (doseq [f (sort-by :red? (:fluffies st)) :when (= :overworld (:realm f))]
+                          (doseq [f (sort-by :red? (:fluffies st)) :when (= shown (:realm f :overworld))]
                             (dot (:x f) (:y f) (if (:red? f) 4.5 3.5) "#ffffff")
                             (dot (:x f) (:y f) (if (:red? f) 3.5 2.5) (second (fluffy-colors f))))
-                          (when-let [{:keys [x y]} (:ship st)]
+                          (when-let [{:keys [x y]} (when (= shown :overworld) (:ship st))]
                             (dot (+ x (/ ship-w 2)) (+ y (/ ship-h 2)) 4 "#111111")
                             (dot (+ x (/ ship-w 2)) (+ y (/ ship-h 2)) 3 "#d9dee6"))
-                          (when (= :overworld (:realm st))
+                          (when (= shown (:realm st))
                             (let [{:keys [x y]} (:player st)]
                               (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 3 "#111111")
                               (dot (+ x (/ player-w 2)) (+ y (/ player-h 2)) 2 "#ffffff")))))))
@@ -3970,8 +4128,13 @@
          (draw)
          #(js/clearInterval id)))
      [state-ref])
-    ($ :canvas {:ref canvas-ref :width W :height H
-                :class "block w-[480px] max-w-[45vw] rounded-md border-2 border-amber-800 [image-rendering:pixelated]"})))
+    ($ :div {:class "relative"}
+       ($ :canvas {:ref canvas-ref :width W :height H
+                   :class (str "block w-[480px] max-w-[45vw] rounded-md border-2 [image-rendering:pixelated] "
+                               (if (= shown :mountains) "border-slate-300" "border-amber-800"))})
+       (when (= shown :mountains)
+         ($ :div {:class "absolute top-1 left-2 rounded bg-slate-800/70 px-1.5 text-xs font-bold text-slate-100 select-none"}
+            "Mountains")))))
 
 (defui space-map
   "Draws outer space one pixel per tile, refreshed twice a second, with the stars as
@@ -4292,6 +4455,13 @@
           (when (and (pos? stars) (not (contains? visited :space)))
             {:score (* 2 stars) :pic {:icon :star}
              :title "STARS COLLECTED" :text (str (plural stars "star was" "stars were") " collected from the sky.")})
+          (when (contains? visited :mountains)
+            {:score (+ 14 (* 2 (:ore log 0))) :pic {:icon :ore}
+             :title (p :mountains ["MINER CLIMBS THE MOUNTAINS" "TRACKS FOUND IN THE SNOW" "IRON IN THE HILLS"])
+             :text (if (pos? (:ore log 0))
+                     (str "Our miner walked past the end of the valley into the Mountains and dug out "
+                          (plural (:ore log 0) "lump" "lumps") " of iron ore. The smiths are delighted.")
+                     "Our miner walked past the end of the valley into the Mountains. Locals say there is iron in that rock, if you dig deep enough.")})
           (when (contains? visited :slime)
             {:score 15 :pic :slime
              :title "TRIP TO THE SLIME DIMENSION" :text "A portal opened and a miner stepped through into the green. They came back smelling faintly of ooze."})
@@ -4491,6 +4661,7 @@
              _ (reset! state-ref state)
              here (fn [] (get-in @state [:worlds (:realm @state)]))
              home? (fn [] (= :overworld (:realm @state)))
+             outdoors? (fn [] (#{:overworld :mountains} (:realm @state)))
              raf (atom nil)
              last-t (atom nil)
              flips (atom false)
@@ -4562,9 +4733,11 @@
                              dt (if @last-t (min 2 (/ (- t @last-t) 16.667)) 1)
                              _ (reset! last-t t)
                              space? (= :space (:realm @state))
-                             player (:player (swap! state update :player
-                                                    #(cond-> (step-player (:tiles (here)) % (:keys @state) dt)
-                                                       space? wrap-space)))
+                             player (:player (swap! state #(-> %
+                                                               (update :player
+                                                                       (fn [p] (cond-> (step-player (:tiles (here)) p (:keys %) dt)
+                                                                                 space? wrap-space)))
+                                                               cross-edge)))
                              dpr (render-scale)
                              vw js/window.innerWidth
                              vh js/window.innerHeight
@@ -4588,7 +4761,7 @@
                              _ (swap! state assoc :clock clock)
                              tod (time-of-day clock)
                              _ (music/want! (case (:realm @state)
-                                              :overworld (if (:day? tod) :overworld-day :overworld-night)
+                                              (:overworld :mountains) (if (:day? tod) :overworld-day :overworld-night)
                                               :slime :slime-hollow
                                               ;; the throwing part plays from the leap onto the ledge until the boss jumps down
                                               :arena (case (get-in @state [:boss :mode])
@@ -4600,7 +4773,7 @@
                              _ (swing! state (:tiles (here)) dt)
                              ;; the Slime Dimension stays as dark as night; the arena is dimly lit, and
                              ;; space is bright enough that no slimes come out
-                             light (case (:realm @state) :overworld (:light tod) :arena 0.45 :space 0.8 0.15)
+                             light (case (:realm @state) (:overworld :mountains) (:light tod) :arena 0.45 :space 0.8 0.15)
                              world (here)
                              _ (when-let [levels (:levels world)]
                                  (swap! flips not)
@@ -4651,7 +4824,10 @@
                          (.setTransform ctx dpr 0 0 dpr 0 0)
                          (set! (.-imageSmoothingEnabled ctx) false)
                          (.clearRect ctx 0 0 vw vh)
-                         (when (home?) (draw-hills ctx vw vh cam-x cam-y))
+                         (case (:realm @state)
+                           :overworld (draw-hills ctx vw vh cam-x cam-y)
+                           :mountains (draw-peaks ctx vw vh cam-x cam-y)
+                           nil)
                          (doseq [[ox oy] (if space? (space-offsets) [[0 0]])
                                  :let [cam-x (- cam-x ox) cam-y (- cam-y oy)]]
                            (draw-tiles ctx (:tiles world) (:surface world) vw vh cam-x cam-y)
@@ -4685,7 +4861,8 @@
                              (draw-ooze ctx (:tiles world) levels vw vh cam-x cam-y t))
                            (draw-rockets ctx (:rockets @state) cam-x cam-y)
                            (draw-particles ctx particles cam-x cam-y))
-                         (when (home?) (draw-depth ctx (:surface world) vw vh cam-y))
+                         (when (outdoors?)
+                           (draw-depth ctx (if (home?) (aget (:surface world) (quot W 2)) valley-floor) vw vh cam-y))
                          (draw-night ctx vw vh
                                      (- (+ (:x player) (/ player-w 2)) cam-x)
                                      (- (+ (:y player) (/ player-h 2)) cam-y)
@@ -4693,7 +4870,7 @@
                          (doseq [[ox oy] (if space? (space-offsets) [[0 0]])]
                            (draw-flames ctx (:tiles world) vw vh (- cam-x ox) (- cam-y oy) t light))
                          (cond
-                           (home?) (draw-sky ctx vw vh cam-x t tod)
+                           (outdoors?) (draw-sky ctx vw vh cam-x t tod)
                            space? (draw-space-sky ctx vw vh cam-x cam-y)
                            :else
                            (do (set! (.-globalCompositeOperation ctx) "destination-over")

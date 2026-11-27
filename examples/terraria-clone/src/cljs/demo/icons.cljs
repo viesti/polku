@@ -75,6 +75,17 @@
                   "osssdddddo"
                   ".oddddddo."
                   "..oooooo.."]}
+   :ore {:palette {\o "#34343a" \s "#8a8a92" \h "#b8b8c0" \d "#62626a" \r "#b5652e" \l "#e09455"}
+         :rows [".........."
+                "...oooo..."
+                "..ohhsso.."
+                ".ohlrssdo."
+                ".ohrrsrrdo"
+                "ohsssslrdo"
+                "osrlssdddo"
+                "osrrdddrdo"
+                ".oddddddo."
+                "..oooooo.."]}
    :torch {:palette {\y "#ffd54a" \r "#ff7a1a" \c "#fff6c0" \w "#8a5a2b" \d "#5a3418"}
            :rows ["....r....."
                   "...ryr...."
