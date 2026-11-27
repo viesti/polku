@@ -64,6 +64,14 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 .body { margin: 4px 0 0; white-space: pre-line; font-size: 12px; color: #374151;
   background: #f9fafb; border-radius: 6px; padding: 6px 8px; }
 .note { margin: 6px 0 0; color: #6b7280; font-size: 12px; }
+.publish { width: 440px; max-width: calc(100vw - 32px); }
+.publish .head .close { margin-left: auto; padding: 2px 8px; }
+.publish .head .time { margin-left: auto; }
+.publish .head .time + .close { margin-left: 8px; }
+.publish .cmd { max-height: 24vh; }
+.ok-dot, .fail-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #16a34a; }
+.fail-dot { background: #dc2626; }
+.note.warn { color: #b45309; }
 .unsaved-dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; flex: none; }
 .unsaved { margin-top: 8px; padding: 8px 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; }
 .unsaved .sub { font-weight: 600; display: flex; align-items: center; gap: 6px; }
@@ -377,6 +385,42 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                           busy (assoc :disabled ""))
                (if (= busy :save) "Saving…" "Save")))))))
 
+(defn- publish-panel
+  "Shows the publish run: a confirmation before it starts, the time it has been running
+  and its output while it runs, and how it ended."
+  [{:keys [running ok code output startedAt finishedAt error]} unsaved? {:keys [publish toggle-publish]} !ui]
+  (let [done? (and (not running) (some? ok))]
+    (h "div" {:class "panel publish"}
+       (h "div" {:class "head"}
+          (cond running (h "span" {:class "spin"})
+                done?   (h "span" {:class (if ok "ok-dot" "fail-dot")}))
+          (cond running "Publishing…"
+                (and done? ok) "Published"
+                done? "Publishing failed"
+                :else "Publish")
+          (when running
+            (let [el (h "span" {:class "time"} (clock (- (js/Date.now) (js/Date.parse startedAt))))]
+              (swap! !ui assoc :pub-time-el el)
+              el))
+          (when (and done? startedAt finishedAt)
+            (h "span" {:class "time"} (clock (- (js/Date.parse finishedAt) (js/Date.parse startedAt)))))
+          (h "button" {:class "ghost close" :title "Close" :onclick (fn [_] (toggle-publish))} "✕"))
+       (when error (h "p" {:class "msg error"} error))
+       (when-not (or running done?)
+         (h "p" {:class "msg"} "Builds the app and publishes it with the project's publish command."))
+       (when (and unsaved? (not running))
+         (h "p" {:class "note warn"} "There are unsaved changes. They are published too, but they are not in the history until you save them."))
+       (when (and done? (not ok) code)
+         (h "p" {:class "note"} (str "The command stopped with exit code " code ".")))
+       (when (seq output)
+         (let [^js pre (h "pre" {:class "cmd"} (str/join "\n" output))]
+           (js/setTimeout #(set! (.-scrollTop pre) (.-scrollHeight pre)) 0)
+           pre))
+       (when-not running
+         (h "div" {:class "row"}
+            (h "button" {:class "primary" :onclick (fn [_] (publish))} (if done? "Publish again" "Publish"))
+            (h "button" {:class "ghost" :onclick (fn [_] (toggle-publish))} (if done? "Close" "Cancel")))))))
+
 (defn- history-panel [{:keys [branch main busy commits loading? error notice changes] :as history}
                       {:keys [toggle-history to-main] :as actions} !ui]
   (when-not (:dirty changes)
@@ -437,7 +481,7 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
        :review  "Plan ready"
        "Last task")))
 
-(defn- view [state {:keys [start dismiss toggle-history show-task open-chat] :as actions} !ui]
+(defn- view [state {:keys [start dismiss toggle-history toggle-publish show-task open-chat] :as actions} !ui]
   (case (:view state)
     :idle      (h "div" {:class "bar"}
                   (when-let [hidden (and show-task (:hidden state))]
@@ -450,6 +494,11 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                                  :onclick (fn [_] (toggle-history))}
                        (when (:unsaved? state) (h "span" {:class "unsaved-dot"}))
                        "History"))
+                  (when (and toggle-publish (get-in state [:publish :configured]))
+                    (h "button" {:class "pill light" :title "Build and publish the app"
+                                 :onclick (fn [_] (toggle-publish))}
+                       (when (get-in state [:publish :running]) (h "span" {:class "spin"}))
+                       "Publish"))
                   (when open-chat
                     (h "button" {:class "pill light" :title "Type a change request"
                                  :onclick (fn [_] (open-chat))}
@@ -489,7 +538,7 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
   `:show-task`, `:open-chat`, `:close-chat` and `:send-chat` (both take the typed text), `:approve`,
   `:revise` (takes the text to edit), `:discard`, `:start-drawing` (takes the typed text),
   `:stop-drawing`, `:attach-shot` (takes the drawing canvas), `:remove-shot` and `:preview-shot`
-  (both take a screenshot id; nil closes the preview), `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-files`, `:save`
+  (both take a screenshot id; nil closes the preview), `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-files`, `:toggle-publish`, `:publish`, `:save`
   (takes the commit message), `:toggle-commit` and `:jump` (both take a commit hash), and `:decide` (takes a permission request id and
   \"allow\" or \"deny\")."
   [actions]
@@ -509,6 +558,8 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                 (if (and heard-only? (= :recording (:view state) (:view @!ui)))
                   (set! (.-textContent ^js (:heard-el @!ui)) (or (:heard state) ""))
                   (do (js/clearInterval (:ticker @!ui))
+                      (js/clearInterval (:pub-ticker @!ui))
+                      (swap! !ui assoc :pub-time-el nil :pub-ticker nil)
                       (when (and (= :chat (:view state)) (not= :chat (:view @!ui)))
                         (swap! !ui assoc :chat (or (:draft state) "")))
                       ;; The canvas sits outside `root`, so a redraw keeps the drawing
@@ -529,8 +580,17 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                                            (when (and (get-in state [:history :open?])
                                                       (not (#{:recording :starting} (:view state))))
                                              (history-panel (:history state) actions !ui))
+                                           (when (and (get-in state [:publish :open?])
+                                                      (get-in state [:publish :configured])
+                                                      (not (#{:recording :starting} (:view state))))
+                                             (publish-panel (:publish state) (:unsaved? state) actions !ui))
                                            (view state actions !ui))
                                         (or (preview state actions) ""))
+                      (when-let [^js el (:pub-time-el @!ui)]
+                        (let [started (js/Date.parse (get-in state [:publish :startedAt]))]
+                          (swap! !ui assoc :pub-ticker
+                                 (js/setInterval #(set! (.-textContent el) (clock (- (js/Date.now) started)))
+                                                 500))))
                       (when (= :recording (:view state))
                         (swap! !ui assoc :ticker
                                (js/setInterval
@@ -539,4 +599,5 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                                 500))))))
      :destroy (fn []
                 (js/clearInterval (:ticker @!ui))
+                (js/clearInterval (:pub-ticker @!ui))
                 (.remove host))}))

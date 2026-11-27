@@ -129,6 +129,16 @@ The History button next to Record lists recent commits from HEAD and the main br
 
 When the working tree has uncommitted changes, a dot marks the History button and the panel opens with an Unsaved changes section. It shows the agent's summary of the changes as an editable message and lists the changed files with their added and removed lines. Save commits every change except the Polku workspace with that message and pushes the current branch to origin. When the push fails, the commit stays and the panel shows git's message. The agent stores the summary with `polku changes -m <text>` after each approved change, and the skill tells it to describe all the uncommitted changes, not only the latest. A commit made some other way makes the stored summary stale, and the panel leaves it out. The server reports the changes with `GET /git/changes` and saves them with `POST /git/save`.
 
+### Publishing
+
+When `polku serve` starts with `POLKU_PUBLISH_COMMAND` set, the widget shows a Publish button next to History. The variable holds a shell command, so the command and its target, such as a cloud profile and bucket, stay out of version control:
+
+```sh
+POLKU_PUBLISH_COMMAND='AWS_PROFILE=my-profile ./bin/publish s3://my-bucket/app/' npm run dev
+```
+
+Publish asks for confirmation and warns when there are unsaved changes, because the command builds whatever is in the working tree. While the command runs in the project directory (the parent of the workspace), the panel shows the elapsed time and the command's output; afterwards it shows whether the command succeeded and its last output lines. One run goes at a time. The server reports the status with `GET /publish` and starts a run with `POST /publish`.
+
 ### Approving permission requests in the browser
 
 The person in the browser cannot see the agent's terminal, so a permission prompt there stalls the loop. `polku permission-hook` is a Claude Code `PermissionRequest` hook that shows the request in the widget with Allow and Deny buttons and passes the answer back to the agent. If the server is unreachable or nobody answers within `--timeout` seconds (default 300), the agent falls back to its own terminal prompt. `polku init` does not install the hook, so add it to the project's .claude/settings.json:
@@ -170,7 +180,7 @@ polku mcp                                    serve sessions as MCP tools over st
 polku init                                   install the Claude Code skill and the MCP server entry
 ```
 
-The commands that work with sessions take `--dir <path>` to use another workspace directory than .polku. `polku serve` also reads `POLKU_HOST` (the listen address) and `POLKU_ORIGIN` (extra allowed origins, separated by commas). The CLI commands always reach the server at 127.0.0.1.
+The commands that work with sessions take `--dir <path>` to use another workspace directory than .polku. `polku serve` also reads `POLKU_HOST` (the listen address), `POLKU_ORIGIN` (extra allowed origins, separated by commas) and `POLKU_PUBLISH_COMMAND` (the command the widget's Publish button runs). The CLI commands always reach the server at 127.0.0.1.
 
 ## MCP tools
 

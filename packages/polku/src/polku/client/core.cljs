@@ -397,6 +397,37 @@
                                             "The Polku server is older than this widget. Restart it to save changes."
                                             (.-message err))})))))
 
+(defn- set-publish! [{:keys [!state set-state!]} changes]
+  (set-state! {:publish (merge (:publish @!state) changes)}))
+
+(defn- watch-publish!
+  "Reads the publish status from the server, and keeps reading it while a run is going."
+  [{:keys [config !state] :as ctx}]
+  (-> (fetch-json (str (:endpoint config) "/publish") nil)
+      (.then (fn [{:keys [configured running] :as st}]
+               (let [shown (select-keys (:publish @!state) [:configured :running :startedAt :finishedAt :ok :code :output])]
+                 (when (not= shown st)
+                   (set-publish! ctx (merge {:running false :ok nil :output nil :startedAt nil :finishedAt nil} st))))
+               (when (and configured running)
+                 (js/setTimeout #(watch-publish! ctx) poll-ms))))
+      ;; An older server has no publishing, so no button shows
+      (.catch (fn [_] nil))))
+
+(defn- toggle-publish! [{:keys [!state] :as ctx}]
+  (if (get-in @!state [:publish :open?])
+    (set-publish! ctx {:open? false :error nil})
+    (do (set-publish! ctx {:open? true :error nil})
+        (watch-publish! ctx))))
+
+(defn- publish!
+  "Asks the server to run the publish command and follows the run until it ends."
+  [{:keys [config] :as ctx}]
+  (set-publish! ctx {:error nil :running true :ok nil :output [] :startedAt (.toISOString (js/Date.))})
+  (-> (post-json (str (:endpoint config) "/publish") {})
+      (.then (fn [_] (watch-publish! ctx)))
+      (.catch (fn [^js err]
+                (set-publish! ctx {:running false :startedAt nil :error (.-message err)})))))
+
 (defn- watch-approvals!
   "Polls the server for the agent's unanswered permission requests and redraws when they change."
   [{:keys [config !state set-state!] :as ctx}]
@@ -470,6 +501,8 @@
                                      :to-main        #(to-main! ctx)
                                      :toggle-files   #(toggle-files! ctx)
                                      :save           #(save! ctx %)
+                                     :toggle-publish #(toggle-publish! ctx)
+                                     :publish        #(publish! ctx)
                                      :decide         #(decide! ctx %1 %2)})
             ctx       (assoc ctx :host (:host w))
             api       #js {:start    (fn [overrides]
@@ -490,6 +523,7 @@
         (check-languages! ctx)
         (watch-approvals! ctx)
         (watch-changes! ctx)
+        (watch-publish! ctx)
         ;; A full page reload during an agent run resumes showing that run's status
         (when-let [pending (recall)]
           ((:set-state! ctx) {:view :waiting :id pending :status "complete" :progress []})

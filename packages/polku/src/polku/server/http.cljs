@@ -3,6 +3,7 @@
   (:require ["node:http" :as http]
             [polku.server.approvals :as approvals]
             [polku.server.git :as git]
+            [polku.server.publish :as publish]
             [polku.server.store :as store]))
 
 (def ^:private max-body (* 25 1024 1024))
@@ -54,6 +55,12 @@
                  (log (str "saved the changes as " hash
                            (if pushed (str " and pushed " branch " to origin") (str ", push failed: " push-error))))
                  result))))]
+
+   ["GET" #"/publish"
+    (fn [_] (publish/status))]
+
+   ["POST" #"/publish"
+    (fn [{:keys [root log]}] (publish/start! root log))]
 
    ["POST" #"/git/jump"
     (fn [{:keys [root req log]}]

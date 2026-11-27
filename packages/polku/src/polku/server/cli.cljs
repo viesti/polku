@@ -19,6 +19,8 @@
                         to reach it from other machines; the CLI commands still use 127.0.0.1
       --origin <url>    Extra allowed browser origin; repeatable. Localhost is always allowed.
                         $POLKU_ORIGIN adds more, separated by commas
+                        $POLKU_PUBLISH_COMMAND is a shell command that the widget's Publish
+                        button runs in the project directory
   wait                  Block until a session needs the agent, claim it, print its task brief.
                         A new session asks for a plan; an approved plan asks for the change
       --timeout <s>     Exit with code 2 if nothing arrives within this many seconds
