@@ -1,9 +1,6 @@
 {:source-paths ["src/cljs" "../../packages/polku/src"]
  :dependencies [[com.pitch/uix.core "1.4.9"]
                 [com.pitch/uix.dom "1.4.9"]]
- ;; The backend owns .nrepl-port
- :nrepl false
- ;; Loopback only, so `tailscale serve` can forward port 9630 on the tailnet address
  :http {:port 9630 :host "localhost"}
  :builds
  {:app
