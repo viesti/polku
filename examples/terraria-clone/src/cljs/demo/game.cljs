@@ -2378,6 +2378,32 @@
     (rect "#1d1d1d" 2 0 15 5)
     (rect "#3a3a3a" 2 4 15 1)))
 
+(defn- near-player?
+  "Checks that the point `x`, `y` lies within `r` pixels of the player's middle."
+  [{:keys [player]} x y r]
+  (< (js/Math.hypot (- x (+ (:x player) (/ player-w 2))) (- y (+ (:y player) (/ player-h 2)))) r))
+
+(defn discover
+  "Adds to `:seen` the parts of the game that the player has met, which unlock their
+  sections of the How to play help. Games saved before `:seen` existed unlock what
+  their other state shows the player has reached."
+  [{:keys [bag realm enemies fluffies robbers goo-beaten? star-shop? gate-open?] :as st}]
+  (let [has?  (fn [id] (some #(= id (:id %)) bag))
+        found (cond-> #{}
+                (or (has? :rope) (has? :torch)) (conj :rope)
+                (some #(near-player? st (:x %) (:y %) (* 30 T)) enemies) (conj :slimes)
+                (or (has? :amulet) (= :slime realm)) (conj :dimension)
+                (or (has? :key) (= :arena realm) gate-open?) (conj :goo)
+                (some #(and (= (:realm % :overworld) realm) (near-player? st (:x %) (:y %) (* 12 T))) fluffies)
+                (conj :fluffies)
+                (and (= :overworld realm) (some #(near-player? st (:x %) (:y %) (* 40 T)) robbers)) (conj :robbers)
+                goo-beaten? (conj :drones)
+                (or (= :space realm) star-shop? (has? :star)) (conj :space))
+        seen  (or (:seen st) #{})]
+    (if (every? seen found)
+      st
+      (assoc st :seen (into seen found)))))
+
 (defn- draw-robbers
   "Draws the robbers, with a health bar over each one that has been hit."
   [^js ctx robbers cam-x cam-y]
@@ -3333,32 +3359,68 @@
                  :style {:width (str (* 100 (/ hp max-hp)) "%")}}))
      ($ :div {:class "mt-1 text-xs text-white/60"} "M menu")))
 
-(defui how-to-play []
-  ($ :ul {:class "space-y-1 text-white/90"}
-     ($ :li "A and D move, Space jumps")
-     ($ :li "The mouse aims the pickaxe")
-     ($ :li "Shift or click digs or hits slimes")
-     ($ :li "On a tablet, the pad in the bottom left corner moves, jumps and climbs, a finger anywhere else aims and digs, the E button in the bottom right does what the E key does, and tapping a bag slot uses its item where you last touched")
-     ($ :li "Keys 1 to 9 and 0 use the items in your bag; a Healing Potion gives +" potion-heal " health")
-     ($ :li "The bag has " bag-size " slots, each holding a stack of one kind of item; when it is full, new finds are lost")
-     ($ :li "Rope hangs down from where the mouse points, one rope per block; jump into it to grab it")
-     ($ :li "Hit a rope with the pickaxe to take all of it back")
-     ($ :li "Digging gives Dirt and Stone blocks (up to 100 each); use them from the bag to build")
-     ($ :li "Torches are placed from the bag like blocks and light up their surroundings; near a torch health comes back twice as fast. Hit a torch with the pickaxe to take it back")
-     ($ :li "On a rope, Space or W climbs, S climbs down, A or D jumps off")
-     ($ :li "Slimes come out in the caves at night; one in twenty drops a Dimension Amulet")
-     ($ :li "Use the amulet on the surface to open a portal, then hit the portal with the pickaxe to enter the Slime Dimension, where darker slimes take twice the hits and hit twice as hard")
-     ($ :li "In green ooze you move slowly; hold Space to swim up")
-     ($ :li "Slimes in the Slime Dimension sometimes drop an Arena Key; far to the east a locked gate leads to the Lord of Goo's arena")
-     ($ :li "Rare blue Fluffies hide in caves around the world; press E next to one to make it follow you, and E again to let it wait")
-     ($ :li "Buy a Fluffy House at the shop and place it on the ground from the bag; a Fluffy following you moves into an empty house and pays you " house-reward " coins")
-     ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")
-     ($ :li "Once the Lord of Goo is beaten, drones fly over the overworld and now and then land; break a landed drone with the pickaxe and a spaceship comes down somewhere nearby")
-     ($ :li "Hit the spaceship with the pickaxe to fly to outer space, where gravity is weak and you can hop between asteroids; space wraps round, so flying on past one edge brings you in over the opposite one. Hit the ship again to fly home")
-     ($ :li "Purple aliens float after you in space and hurt on touch; " alien-hp-min " to " alien-hp-max " pickaxe hits pop one for " alien-reward " coins. Touch the gold stars to collect them and sell them at the shop")
-     ($ :li "Once you have a star, the shop also sells things for stars: a Magic Mirror to stand on the ground (hit it with the pickaxe to take it back), Firework Rockets, a Map of Space, and an Alien Tamer that turns the nearest alien into a tame friend who follows you like a Fluffy")
-     ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off. Knock a robber out with " robber-hp " pickaxe hits to get back half of what it stole")
-     ($ :li "Find the shop on the surface and press E there to sell your finds and buy potions, rope and torches")))
+(defui help-section [{:keys [title children]}]
+  ($ :section {:class "mt-3 first:mt-0"}
+     ($ :h3 {:class "mb-1 text-sm font-bold uppercase tracking-wide text-amber-200"} title)
+     ($ :ul {:class "list-disc space-y-1 pl-5 text-white/90"} children)))
+
+(defui how-to-play
+  "Shows the help in sections. Controls, the bag and the shop are always there; each
+  other section shows once the player has met that part of the game, as `discover`
+  records in `seen`, so the help does not give away what is still to come."
+  [{:keys [seen]}]
+  (let [seen (or seen #{})
+        hidden (count (remove seen [:rope :slimes :dimension :goo :fluffies :robbers :drones :space]))]
+    ($ :div {:class "max-h-[55vh] overflow-y-auto pr-1"}
+       ($ help-section {:title "Controls"}
+          ($ :li "A and D move, Space jumps")
+          ($ :li "The mouse aims the pickaxe; Shift or click digs, or hits whatever is in the way")
+          ($ :li "E acts on what you stand next to, such as the shop")
+          ($ :li "On a tablet, the pad in the bottom left corner moves, jumps and climbs, a finger anywhere else aims and digs, the E button in the bottom right does what the E key does, and tapping a bag slot uses its item where you last touched")
+          ($ :li "M opens and closes this menu"))
+       ($ help-section {:title "Bag and building"}
+          ($ :li "Keys 1 to 9 and 0 use the items in your bag; a Healing Potion gives +" potion-heal " health")
+          ($ :li "The bag has " bag-size " slots, each holding a stack of one kind of item; when it is full, new finds are lost")
+          ($ :li "Digging gives Dirt and Stone blocks (up to 100 each); use them from the bag to build"))
+       ($ help-section {:title "Shop"}
+          ($ :li "Find the shop on the surface and press E there to sell your finds and buy potions, rope and torches"))
+       (when (seen :rope)
+         ($ help-section {:title "Rope and torches"}
+            ($ :li "Rope hangs down from where the mouse points, one rope per block; jump into it to grab it")
+            ($ :li "On a rope, Space or W climbs, S climbs down, A or D jumps off")
+            ($ :li "Hit a rope with the pickaxe to take all of it back")
+            ($ :li "Torches are placed from the bag like blocks and light up their surroundings; near a torch health comes back twice as fast. Hit a torch with the pickaxe to take it back")))
+       (when (seen :slimes)
+         ($ help-section {:title "Slimes and night"}
+            ($ :li "Slimes come out in the caves at night; one in twenty drops a Dimension Amulet")))
+       (when (seen :dimension)
+         ($ help-section {:title "The Slime Dimension"}
+            ($ :li "Use the amulet on the surface to open a portal, then hit the portal with the pickaxe to enter the Slime Dimension, where darker slimes take twice the hits and hit twice as hard")
+            ($ :li "In green ooze you move slowly; hold Space to swim up")))
+       (when (seen :goo)
+         ($ help-section {:title "The Lord of Goo"}
+            ($ :li "Slimes in the Slime Dimension sometimes drop an Arena Key; far to the east a locked gate leads to the Lord of Goo's arena")))
+       (when (seen :fluffies)
+         ($ help-section {:title "Fluffies"}
+            ($ :li "Rare blue Fluffies hide in caves around the world; press E next to one to make it follow you, and E again to let it wait")
+            ($ :li "Buy a Fluffy House at the shop and place it on the ground from the bag; a Fluffy following you moves into an empty house and pays you " house-reward " coins")
+            ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")))
+       (when (seen :robbers)
+         ($ help-section {:title "Robbers"}
+            ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
+            ($ :li "Knock a robber out with " robber-hp " pickaxe hits to get back half of what it stole")))
+       (when (seen :drones)
+         ($ help-section {:title "Drones and the spaceship"}
+            ($ :li "Drones fly over the overworld and now and then land; break a landed drone with the pickaxe and a spaceship comes down somewhere nearby")
+            ($ :li "Hit the spaceship with the pickaxe to fly to outer space, and hit it again there to fly home")))
+       (when (seen :space)
+         ($ help-section {:title "Outer space"}
+            ($ :li "Gravity is weak in space, so you can hop between asteroids; space wraps round, so flying on past one edge brings you in over the opposite one")
+            ($ :li "Purple aliens float after you and hurt on touch; " alien-hp-min " to " alien-hp-max " pickaxe hits pop one for " alien-reward " coins")
+            ($ :li "Touch the gold stars to collect them and sell them at the shop")
+            ($ :li "Once you have a star, the shop also sells things for stars: a Magic Mirror to stand on the ground (hit it with the pickaxe to take it back), Firework Rockets, a Map of Space, and an Alien Tamer that turns the nearest alien into a tame friend who follows you like a Fluffy")))
+       (when (pos? hidden)
+         ($ :p {:class "mt-3 text-xs italic text-white/60"} "More tips appear here as you discover new things.")))))
 
 (defn- ->b64 [^js arr]
   (let [b (js/Uint8Array. (.-buffer arr) (.-byteOffset arr) (.-byteLength arr))
@@ -3630,7 +3692,7 @@
              "Import file")
           ($ :span {:class "ml-2 text-xs text-white/50"} "Add a save from a downloaded file")))))
 
-(defui menu-panel [{:keys [on-close snapshot restore]}]
+(defui menu-panel [{:keys [on-close snapshot restore seen]}]
   (let [[tab set-tab!] (use-state :help)
         tab-btn (fn [id label]
                   ($ :button {:class (str "rounded-t px-3 py-1.5 font-semibold "
@@ -3651,7 +3713,7 @@
              (tab-btn :help "How to play")
              (tab-btn :saves "Saves"))
           (case tab
-            :help ($ how-to-play)
+            :help ($ how-to-play {:seen seen})
             :saves ($ saves-tab {:snapshot snapshot :restore restore}))
           ($ :div {:class "mt-4 text-xs text-white/60"} "Press M again to close")))))
 
@@ -4134,7 +4196,7 @@
                                  (flow-ooze! (:tiles world) levels @flips))
                              _ (step-enemies! state (:tiles world) (:surface world) light dt)
                              _ (step-boss! state (:tiles world) dt)
-                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt)))
+                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt) discover))
                              _ (set-quest! (:quest @state))
                              _ (when (and (= :slime (:realm @state)) (:gate-open? @state)
                                           (touching? player (assoc (:gate world) :w gate-w :h gate-h)))
@@ -4288,6 +4350,8 @@
                         :space-map? space-map? :on-buy-space-map on-buy-space-map}))
        (when menu?
          ($ menu-panel {:on-close #(set-menu! false)
+                        ;; the game is paused while the menu is open, so this stays current
+                        :seen (some-> @state-ref deref :seen)
                         :snapshot #(save-data @@state-ref)
                         :restore (fn [data]
                                    (sync! (swap! @state-ref load-data data)))})))))
