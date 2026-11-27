@@ -43,6 +43,18 @@
    ["GET" #"/git/log"
     (fn [{:keys [root]}] (git/history root))]
 
+   ["GET" #"/git/changes"
+    (fn [{:keys [root]}] (git/changes root))]
+
+   ["POST" #"/git/save"
+    (fn [{:keys [root req log]}]
+      (.then (read-json req)
+             (fn [^js body]
+               (let [{:keys [hash branch pushed push-error] :as result} (git/save! root (.-message body))]
+                 (log (str "saved the changes as " hash
+                           (if pushed (str " and pushed " branch " to origin") (str ", push failed: " push-error))))
+                 result))))]
+
    ["POST" #"/git/jump"
     (fn [{:keys [root req log]}]
       (.then (read-json req)

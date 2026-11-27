@@ -29,8 +29,17 @@ Building an approved plan:
 
 7. Make the change in the application source, as the approved plan describes. Follow the project's own instructions (CLAUDE.md) for where code lives and how reload works. Keep the change as small as the request; do not restart dev processes unless reload cannot pick the change up. Report progress as you go (see below).
 8. Check that the change compiled and that the app still loads.
-9. Tell the user what happened in one plain sentence: `npx polku done <id> -m "Added a title to the page."` The message appears in the widget in their browser. If you could not do what the plan said, or had to deviate from it, say that in the message.
-10. Go back to step 1.
+9. Update the summary of the unsaved changes (see below).
+10. Tell the user what happened in one plain sentence: `npx polku done <id> -m "Added a title to the page."` The message appears in the widget in their browser. If you could not do what the plan said, or had to deviate from it, say that in the message.
+11. Go back to step 1.
+
+## Summary of the unsaved changes
+
+The widget's History panel lists the changes that are not yet committed, with a summary from you that the user can edit and save. Saving commits every change with that text as the message and pushes the branch to origin, so the summary has to describe all the uncommitted changes, not just the last request.
+
+- After each approved change, run `npx polku changes` to see the uncommitted files and the summary you stored before, then store a new one: `npx polku changes -m "<summary>"`.
+- Write it as a commit message in the user's language: a short first line that names the change (such as "Add robbers that walk the surface"), a blank line, then a few plain sentences about what changed for the user. Merge the new change into the earlier summary rather than appending a log of requests, and leave out changes that were undone.
+- A commit made in any other way, such as by you when the user asks, makes the stored summary stale, and the panel stops showing it. Store a new one when there are new changes.
 
 ## Reading the pointer
 

@@ -64,6 +64,24 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
 .body { margin: 4px 0 0; white-space: pre-line; font-size: 12px; color: #374151;
   background: #f9fafb; border-radius: 6px; padding: 6px 8px; }
 .note { margin: 6px 0 0; color: #6b7280; font-size: 12px; }
+.unsaved-dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; flex: none; }
+.unsaved { margin-top: 8px; padding: 8px 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; }
+.unsaved .sub { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.unsaved .sub::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; }
+.unsaved .message { margin-top: 6px; min-height: 72px; max-height: 24vh; }
+.unsaved .toggle { margin-top: 4px; padding: 2px 0; background: none; color: #374151; font-size: 12px; border-radius: 4px; }
+.unsaved .toggle:hover { color: #2563eb; }
+.unsaved .primary:disabled { opacity: .5; cursor: default; }
+.files { list-style: none; margin: 4px 0 0; padding: 0; max-height: 18vh; overflow-y: auto;
+  font: 12px/1.5 ui-monospace, monospace; }
+.files li { display: flex; gap: 8px; align-items: baseline; }
+.files .st { flex: none; width: 64px; color: #6b7280; }
+.files .st.new, .files .st.added { color: #15803d; }
+.files .st.deleted { color: #b91c1c; }
+.files .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files .count { flex: none; }
+.files .add { color: #15803d; }
+.files .del { color: #b91c1c; }
 .approval { width: 440px; max-width: calc(100vw - 32px); border-color: #f59e0b; }
 .approval .head::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #f59e0b;
   animation: pulse 1.2s infinite; }
@@ -315,8 +333,54 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
             (h "div" {:class "meta"} (str short " · " author " · " (short-date date)))
             (when (seq body) (h "div" {:class "body"} body)))))))
 
-(defn- history-panel [{:keys [branch main busy commits dirty loading? error notice] :as history}
-                      {:keys [toggle-history to-main] :as actions}]
+(defn- file-list [files]
+  (apply h "ul" {:class "files"}
+         (for [{:keys [path status added removed]} files]
+           (h "li" {}
+              (h "span" {:class (str "st " status)} status)
+              (h "span" {:class "path" :title path} path)
+              (when added
+                (h "span" {:class "count"}
+                   (h "span" {:class "add"} (str "+" added))
+                   " "
+                   (h "span" {:class "del"} (str "−" removed))))))))
+
+(defn- unsaved-section
+  "Shows the uncommitted changes with the agent's summary as an editable message, and
+  a Save button that commits them with it and pushes them to origin. The message lives
+  in `!ui` so a redraw keeps what the person typed; a new summary from the agent replaces
+  it only while the person has not edited it."
+  [{:keys [changes busy files-open?]} {:keys [save toggle-files]} !ui]
+  (let [{:keys [files summary]} changes
+        text (or (:text summary) "")
+        {:keys [save-msg save-src]} @!ui]
+    (when (or (nil? save-msg) (and (not= text save-src) (= save-msg save-src)))
+      (swap! !ui assoc :save-msg text :save-src text))
+    (let [^js input (h "textarea" {:class "message"
+                                   :placeholder "Describe these changes"
+                                   :oninput (fn [^js e] (swap! !ui assoc :save-msg (.-value (.-target e))))})
+          n (count files)]
+      (set! (.-value input) (:save-msg @!ui))
+      (h "div" {:class "unsaved"}
+         (h "div" {:class "sub"} "Unsaved changes")
+         (if summary
+           (h "p" {:class "note"} "The agent's summary of everything not yet saved. Edit it if you like; it becomes the message in the history.")
+           (h "p" {:class "note"} "The agent has not described these changes yet. Write a message to save them."))
+         input
+         (h "button" {:class "toggle" :onclick (fn [_] (toggle-files))}
+            (str (if files-open? "▾ " "▸ ") n (if (= 1 n) " file changed" " files changed")))
+         (when files-open? (file-list files))
+         (h "div" {:class "row"}
+            (h "button" (cond-> {:class "primary"
+                                 :title "Commit these changes with the message and push them to origin"
+                                 :onclick (fn [_] (save (:save-msg @!ui)))}
+                          busy (assoc :disabled ""))
+               (if (= busy :save) "Saving…" "Save")))))))
+
+(defn- history-panel [{:keys [branch main busy commits loading? error notice changes] :as history}
+                      {:keys [toggle-history to-main] :as actions} !ui]
+  (when-not (:dirty changes)
+    (swap! !ui assoc :save-msg nil :save-src nil))
   (h "div" {:class "panel history"}
      (h "div" {:class "head"}
         "History"
@@ -331,8 +395,8 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
              (if (= busy :main) "Switching…" (str "Back to " main)))))
      (when notice (h "p" {:class "msg"} notice))
      (when error (h "p" {:class "msg error"} error))
-     (when dirty
-       (h "p" {:class "note"} "There are uncommitted changes. They come along when you jump, if they fit."))
+     (when (:dirty changes)
+       (unsaved-section history actions !ui))
      (if (and loading? (empty? commits))
        (h "div" {:class "row"} (h "span" {:class "spin"}) "Loading…")
        (apply h "ol" {:class "commits"}
@@ -379,8 +443,12 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                   (when-let [hidden (and show-task (:hidden state))]
                     (task-pill hidden show-task))
                   (when toggle-history
-                    (h "button" {:class "pill light" :title "Show the commit history"
+                    (h "button" {:class "pill light"
+                                 :title (if (:unsaved? state)
+                                          "Show the commit history. There are unsaved changes"
+                                          "Show the commit history")
                                  :onclick (fn [_] (toggle-history))}
+                       (when (:unsaved? state) (h "span" {:class "unsaved-dot"}))
                        "History"))
                   (when open-chat
                     (h "button" {:class "pill light" :title "Type a change request"
@@ -421,8 +489,8 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
   `:show-task`, `:open-chat`, `:close-chat` and `:send-chat` (both take the typed text), `:approve`,
   `:revise` (takes the text to edit), `:discard`, `:start-drawing` (takes the typed text),
   `:stop-drawing`, `:attach-shot` (takes the drawing canvas), `:remove-shot` and `:preview-shot`
-  (both take a screenshot id; nil closes the preview), `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-commit`
-  and `:jump` (each takes a commit hash), and `:decide` (takes a permission request id and
+  (both take a screenshot id; nil closes the preview), `:set-lang` (takes a language tag), `:toggle-history`, `:to-main`, `:toggle-files`, `:save`
+  (takes the commit message), `:toggle-commit` and `:jump` (both take a commit hash), and `:decide` (takes a permission request id and
   \"allow\" or \"deny\")."
   [actions]
   (let [^js host (js/document.createElement host-tag)
@@ -460,7 +528,7 @@ textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color
                                              (approval-panel (:approvals state) actions))
                                            (when (and (get-in state [:history :open?])
                                                       (not (#{:recording :starting} (:view state))))
-                                             (history-panel (:history state) actions))
+                                             (history-panel (:history state) actions !ui))
                                            (view state actions !ui))
                                         (or (preview state actions) ""))
                       (when (= :recording (:view state))

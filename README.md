@@ -127,6 +127,8 @@ The Web Speech API recognizes one language at a time and cannot detect it. In br
 
 The History button next to Record lists recent commits from HEAD and the main branch. Clicking a subject shows the commit's hash, author, date and body. Jump creates a `history-<hash>` branch at that commit and switches the working tree to it, so the app live-reloads into the earlier version. Back to main switches back. Uncommitted changes come along when git can carry them. The server reads the history with `GET /git/log` and switches branches with `POST /git/jump` and `POST /git/main`.
 
+When the working tree has uncommitted changes, a dot marks the History button and the panel opens with an Unsaved changes section. It shows the agent's summary of the changes as an editable message and lists the changed files with their added and removed lines. Save commits every change except the Polku workspace with that message and pushes the current branch to origin. When the push fails, the commit stays and the panel shows git's message. The agent stores the summary with `polku changes -m <text>` after each approved change, and the skill tells it to describe all the uncommitted changes, not only the latest. A commit made some other way makes the stored summary stale, and the panel leaves it out. The server reports the changes with `GET /git/changes` and saves them with `POST /git/save`.
+
 ### Approving permission requests in the browser
 
 The person in the browser cannot see the agent's terminal, so a permission prompt there stalls the loop. `polku permission-hook` is a Claude Code `PermissionRequest` hook that shows the request in the widget with Allow and Deny buttons and passes the answer back to the agent. If the server is unreachable or nobody answers within `--timeout` seconds (default 300), the agent falls back to its own terminal prompt. `polku init` does not install the hook, so add it to the project's .claude/settings.json:
@@ -157,6 +159,8 @@ polku watch -- <cmd...>                      run <cmd> with the brief on stdin f
 polku plan [id] -m <text>                    show the plan in the user's browser for approval
 polku progress [id] -m <text>                show the step the agent is on in the user's browser
 polku done [id] -m <text>                    finish a session and message the user
+polku changes [-m <text>]                    store the summary of the uncommitted changes, or
+                                             print the changed files and the current summary
 polku summary [id]                           print a session's brief
 polku events [id] [--type <t>]               print raw events as JSON lines
 polku list                                   list sessions

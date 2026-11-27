@@ -5,6 +5,7 @@
             ["node:path" :as path]
             ["node:util" :as util]
             [clojure.string :as str]
+            [polku.server.git :as git]
             [polku.server.http :as http]
             [polku.server.mcp :as mcp]
             [polku.server.store :as store]
@@ -27,6 +28,9 @@
   progress [id] -m <text>
                         Show <text> in the user's browser as the step the agent is on
   done [id] -m <text>   Mark a session finished and show <text> in the user's browser
+  changes -m <text>     Store <text> as the summary of the uncommitted changes that the widget's
+                        History panel shows and offers as the message when the user saves them
+  changes               Print the uncommitted files and their current summary
   summary [id]          Print the brief for a session (default: the latest)
   events [id]           Print the raw events of a session as JSON lines
       --type <t>        Only events of this type; repeatable
@@ -283,6 +287,20 @@ Common options:
                  (when-not id (fail! "no claimed session to finish"))
                  (mark-done! root id (:message opts))
                  (println "session" id "marked done")))
+   "changes" (fn [{:keys [root opts]}]
+               (if-let [text (some-> (:message opts) str/trim not-empty)]
+                 (do (git/write-summary! root text)
+                     (println "summary of the uncommitted changes stored; the History panel shows it"))
+                 (let [{:keys [files summary]} (git/changes root)]
+                   (if (empty? files)
+                     (println "no uncommitted changes")
+                     (do (doseq [{:keys [path status added removed]} files]
+                           (println (str (.padEnd status 9) " " path
+                                         (when added (str "  +" added " -" removed)))))
+                         (println)
+                         (println (if summary
+                                    (str "Summary (" (:updatedAt summary) "):\n" (:text summary))
+                                    "No summary yet; store one with: polku changes -m <text>")))))))
    "summary" (fn [{:keys [root args]}]
                (let [id (or (first args) (latest root))]
                  (when-not id (fail! "no sessions recorded yet"))

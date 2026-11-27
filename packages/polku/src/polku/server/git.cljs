@@ -1,21 +1,35 @@
 (ns polku.server.git
-  "Reads the project's commit history and moves the working tree to an earlier commit."
+  "Reads the project's commit history and uncommitted changes, saves the changes as a
+  commit that is pushed to origin, and moves the working tree to an earlier commit."
   (:require ["node:child_process" :as cp]
+            ["node:fs" :as fs]
+            ["node:path" :as path]
             [clojure.string :as str]))
 
 (def ^:private max-commits 60)
 (def ^:private field-sep "\u001f")
 (def ^:private record-sep "\u001e")
+(def ^:private push-timeout-ms 60000)
+
+(defn- git-raw
+  "Runs git in `root` and returns its untrimmed output, throwing git's own message on
+  failure. `opts` may give `:timeout` in milliseconds and extra `:env` variables."
+  [root opts & args]
+  (try
+    (cp/execFileSync "git" (clj->js args)
+                     (cond-> #js {:cwd root :encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]}
+                       (:timeout opts) (doto (unchecked-set "timeout" (:timeout opts)))
+                       ;; `process.env` is not a plain object, so it is copied before adding to it
+                       (:env opts) (doto (unchecked-set "env" (js/Object.assign #js {} js/process.env
+                                                                                (clj->js (:env opts)))))))
+    (catch :default e
+      (let [msg (str/trim (str (.-stderr ^js e)))]
+        (throw (ex-info (if (seq msg) msg (ex-message e)) {:status 409}))))))
 
 (defn- git
   "Runs git in `root` and returns its trimmed output, throwing git's own message on failure."
   [root & args]
-  (try
-    (str/trim (cp/execFileSync "git" (clj->js args)
-                               #js {:cwd root :encoding "utf8" :stdio #js ["ignore" "pipe" "pipe"]}))
-    (catch :default e
-      (let [msg (str/trim (str (.-stderr ^js e)))]
-        (throw (ex-info (if (seq msg) msg (ex-message e)) {:status 409}))))))
+  (str/trim (apply git-raw root {} args)))
 
 (defn- ref-exists? [root ref]
   (try (git root "rev-parse" "--verify" "--quiet" ref) true
@@ -26,8 +40,104 @@
   [root]
   (some #(when (ref-exists? root (str "refs/heads/" %)) %) ["main" "master"]))
 
+;; Uncommitted changes and the agent's summary of them
+
+(defn- summary-file
+  "Returns the file that holds the agent's summary of the uncommitted changes."
+  [root]
+  (path/join root "changes.json"))
+
+(defn- read-summary
+  "Returns the stored summary of the uncommitted changes when it was written on top of
+  the commit `head`, or nil. A summary from before the last commit describes changes
+  that have been committed since, so it is left out."
+  [root head]
+  (try
+    (let [s (js->clj (js/JSON.parse (fs/readFileSync (summary-file root) "utf8")) :keywordize-keys true)]
+      (when (and (= head (:head s)) (seq (:text s)))
+        (select-keys s [:text :updatedAt])))
+    (catch :default _ nil)))
+
+(defn write-summary!
+  "Stores `text` as the summary of the uncommitted changes, tied to the current commit."
+  [root text]
+  (fs/mkdirSync root #js {:recursive true})
+  (fs/writeFileSync (summary-file root)
+                    (js/JSON.stringify (clj->js {:text      text
+                                                 :head      (git root "rev-parse" "HEAD")
+                                                 :updatedAt (.toISOString (js/Date.))})
+                                       nil 2)))
+
+(defn- clear-summary! [root]
+  (try (fs/unlinkSync (summary-file root)) (catch :default _ nil)))
+
+(def ^:private status-names
+  {\M "modified" \T "modified" \A "added" \D "deleted" \R "renamed" \C "copied" \U "conflict" \? "new"})
+
+(defn- ignored?
+  "Checks whether git ignores the path `p`."
+  [root p]
+  (try (git root "check-ignore" "--quiet" p) true
+       (catch :default _ false)))
+
+(defn- workspace-exclude
+  "Returns a pathspec that leaves the Polku workspace directory `root` out of git's
+  view, or nil when the workspace lies outside the repository or git already ignores
+  it. `git add` refuses a pathspec that names an ignored path, even to exclude it."
+  [root]
+  (let [top (git root "rev-parse" "--show-toplevel")
+        rel (path/relative top root)]
+    (when (and (seq rel) (not (str/starts-with? rel "..")) (not (ignored? root root)))
+      (str ":(top,exclude)" (str/replace rel "\\" "/")))))
+
+(defn- whole-tree
+  "Returns the pathspec arguments that cover the whole repository except the workspace."
+  [root]
+  (into ["--" ":/"] (keep identity [(workspace-exclude root)])))
+
+(defn- changed-files
+  "Lists the files that differ from the last commit, untracked ones included, with the
+  number of lines added and removed where git can count them. The Polku workspace is
+  left out."
+  [root]
+  (let [spec    (whole-tree root)
+        counts  (into {}
+                      (for [line (str/split-lines (apply git-raw root {} "diff" "HEAD" "--numstat" "--no-renames" spec))
+                            :let [[added removed file] (str/split line #"\t" 3)
+                                  added   (js/parseInt added 10)
+                                  removed (js/parseInt removed 10)]
+                            ;; binary files have "-" for both counts
+                            :when (and file (js/Number.isFinite added))]
+                        [file {:added added :removed removed}]))
+        entries (str/split (apply git-raw root {} "status" "--porcelain=v1" "-z" "--untracked-files=all" spec)
+                           #"\u0000")]
+    (loop [[e & more] entries
+           out        []]
+      (cond
+        (and (nil? e) (empty? more)) out
+        (< (count e) 4)              (recur more out)
+        :else
+        (let [x    (nth e 0)
+              y    (nth e 1)
+              file (subs e 3)
+              code (if (= \space x) y x)]
+          ;; a rename or copy is followed by the old name as an entry of its own
+          (recur (if (#{\R \C} x) (rest more) more)
+                 (conj out (merge {:path file :status (get status-names code "modified")}
+                                  (get counts file)))))))))
+
+(defn changes
+  "Returns the uncommitted changes: whether there are any, the changed files and the
+  agent's summary of them."
+  [root]
+  (let [files (changed-files root)]
+    {:dirty   (boolean (seq files))
+     :files   files
+     :summary (when (seq files) (read-summary root (git root "rev-parse" "HEAD")))}))
+
 (defn history
-  "Lists the newest commits reachable from HEAD or the main branch, with the current branch and commit."
+  "Lists the newest commits reachable from HEAD or the main branch, with the current
+  branch and commit and the uncommitted changes."
   [root]
   (let [head   (git root "rev-parse" "HEAD")
         branch (git root "branch" "--show-current")
@@ -35,17 +145,43 @@
         out    (apply git root "log" (str "-n" max-commits) "--topo-order"
                       (str "--format=%H" field-sep "%h" field-sep "%an" field-sep "%aI" field-sep
                            "%s" field-sep "%b" record-sep)
-                      (cond-> ["HEAD"] main (conj main)))]
+                      (cond-> ["HEAD"] main (conj main)))
+        chg    (changes root)]
     {:branch  branch
      :main    main
      :head    head
-     :dirty   (boolean (seq (git root "status" "--porcelain" "--untracked-files=no")))
+     :dirty   (:dirty chg)
+     :changes chg
      :commits (vec (for [rec (str/split out (re-pattern record-sep))
                          :let [rec (str/replace rec #"^\n+" "")]
                          :when (seq rec)
                          :let [[hash short author date subject body] (str/split rec (re-pattern field-sep) -1)]]
                      {:hash hash :short short :author author :date date
                       :subject subject :body (str/trim (or body ""))}))}))
+
+(defn save!
+  "Commits every uncommitted change with `message` and pushes the current branch to
+  origin. The commit stays when the push fails; the result then has `:pushed false` and
+  git's message as `:push-error`."
+  [root message]
+  (let [message (some-> message str str/trim not-empty)]
+    (when-not message
+      (throw (ex-info "Write a message that describes the changes." {:status 400})))
+    (when-not (seq (changed-files root))
+      (throw (ex-info "There are no unsaved changes." {:status 409})))
+    (apply git root "add" "--all" (whole-tree root))
+    (git root "commit" "--quiet" "-m" message)
+    (clear-summary! root)
+    (let [hash   (git root "rev-parse" "--short" "HEAD")
+          branch (git root "branch" "--show-current")]
+      (if-not (seq branch)
+        {:hash hash :pushed false :push-error "The commit is not on a branch, so there is nothing to push."}
+        (try
+          (git-raw root {:timeout push-timeout-ms :env {"GIT_TERMINAL_PROMPT" "0"}}
+                   "push" "--set-upstream" "origin" branch)
+          {:hash hash :branch branch :pushed true}
+          (catch :default e
+            {:hash hash :branch branch :pushed false :push-error (ex-message e)}))))))
 
 (defn- free-branch-name [root base]
   (->> (cons base (map #(str base "-" %) (range 2 100)))

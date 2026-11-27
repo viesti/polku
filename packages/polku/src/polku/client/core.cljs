@@ -353,6 +353,50 @@
                                             "The Polku server is older than this widget. Restart it to switch branches."
                                             (.-message err))})))))
 
+(def ^:private changes-poll-ms 4000)
+
+(defn- watch-changes!
+  "Polls the server for the uncommitted changes, which mark the History button and fill
+  the open History panel's Unsaved changes section, and redraws only when they change."
+  [{:keys [config !state set-state!] :as ctx}]
+  (-> (fetch-json (str (:endpoint config) "/git/changes") nil)
+      (.then (fn [chg]
+               (let [{:keys [unsaved? history]} @!state]
+                 (when (or (not= unsaved? (:dirty chg))
+                           (and (:open? history) (not= chg (:changes history))))
+                   (set-state! (cond-> {:unsaved? (:dirty chg)}
+                                 (:open? history)
+                                 (assoc :history (assoc history :changes chg :dirty (:dirty chg)))))))))
+      ;; An older server has no changes to report, and one that is down shows none
+      (.catch (fn [_]
+                (when (:unsaved? @!state)
+                  (set-state! {:unsaved? false}))))
+      (.finally #(js/setTimeout (fn [] (watch-changes! ctx)) changes-poll-ms))))
+
+(defn- toggle-files! [{:keys [!state] :as ctx}]
+  (set-history! ctx {:files-open? (not (get-in @!state [:history :files-open?]))}))
+
+(defn- save!
+  "Commits the uncommitted changes with `message` and pushes them to origin."
+  [{:keys [config set-state!] :as ctx} message]
+  (set-history! ctx {:busy :save :notice nil :error nil})
+  (-> (post-json (str (:endpoint config) "/git/save") {:message message})
+      (.then (fn [{:keys [hash branch pushed push-error]}]
+               (set-state! {:unsaved? false})
+               ;; Loading the history clears the error line, so the outcome is shown after it
+               (.then (load-history! ctx)
+                      (fn [_]
+                        (set-history! ctx (if pushed
+                                            {:busy nil :notice (str "Saved as " hash " and sent to " branch " on origin.")}
+                                            {:busy nil
+                                             :error (str "Saved as " hash " on this computer, but sending it to origin failed: "
+                                                         push-error)}))))))
+      (.catch (fn [^js err]
+                (set-history! ctx {:busy nil
+                                   :error (if (= "not found" (.-message err))
+                                            "The Polku server is older than this widget. Restart it to save changes."
+                                            (.-message err))})))))
+
 (defn- watch-approvals!
   "Polls the server for the agent's unanswered permission requests and redraws when they change."
   [{:keys [config !state set-state!] :as ctx}]
@@ -424,6 +468,8 @@
                                      :toggle-commit  #(toggle-commit! ctx %)
                                      :jump           #(jump! ctx %)
                                      :to-main        #(to-main! ctx)
+                                     :toggle-files   #(toggle-files! ctx)
+                                     :save           #(save! ctx %)
                                      :decide         #(decide! ctx %1 %2)})
             ctx       (assoc ctx :host (:host w))
             api       #js {:start    (fn [overrides]
@@ -443,6 +489,7 @@
         ((:render w) @!state false)
         (check-languages! ctx)
         (watch-approvals! ctx)
+        (watch-changes! ctx)
         ;; A full page reload during an agent run resumes showing that run's status
         (when-let [pending (recall)]
           ((:set-state! ctx) {:view :waiting :id pending :status "complete" :progress []})
