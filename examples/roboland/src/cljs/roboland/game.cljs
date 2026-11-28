@@ -122,8 +122,17 @@
     (.set (.-scale m) 1 (+ 0.6 (* 0.4 (hash2 x 1))) 1)
     m))
 
-(defn- scatter [scene]
-  (let [obstacles (array)]
+(defn- rock-obstacle
+  "Obstacle entry for a rock lying on the ground: #js [x z radius rock]."
+  [^js rock]
+  (let [p (.-position rock)]
+    #js [(.-x p) (.-z p) (* 0.45 (.. rock -userData -size)) rock]))
+
+(defn- scatter
+  "Adds trees and rocks to the scene. Returns [obstacles rocks]."
+  [scene]
+  (let [obstacles (array)
+        rocks (array)]
     (dotimes [i 900]
       (let [x (* world-size (- (hash2 i 1.3) 0.5) 0.9)
             z (* world-size (- (hash2 i 2.7) 0.5) 0.9)
@@ -136,10 +145,15 @@
             (.push obstacles #js [x z (* 0.45 s)]))
 
           (and (> h 0.2) (< roll 0.21))
-          (let [s (+ 0.5 (* 0.9 (hash2 i 4.4)))]
-            (.add scene (make-rock x z s))
-            (.push obstacles #js [x z (* 0.45 s)])))))
-    obstacles))
+          (let [s (+ 0.5 (* 0.9 (hash2 i 4.4)))
+                rock (make-rock x z s)]
+            (set! (.. rock -userData -size) s)
+            (.add scene rock)
+            (.push rocks rock)
+            (let [o (rock-obstacle rock)]
+              (set! (.. rock -userData -obstacle) o)
+              (.push obstacles o))))))
+    [obstacles rocks]))
 
 ;; ---------------------------------------------------------------------------
 ;; Robot
@@ -238,7 +252,7 @@
         camera (THREE/OrthographicCamera. -1 1 1 -1 0.1 500)
         sun (THREE/DirectionalLight. 0xffffff 2.2)
         terrain (make-terrain)
-        obstacles (scatter scene)
+        [obstacles rocks] (scatter scene)
         start (start-position obstacles)
         {:keys [group head bulb legs arms ^js metal]} (make-robot)
         {:keys [^js root ^js bubble ^js bar ^js fill]} (make-hud)
@@ -247,8 +261,38 @@
         raycaster (THREE/Raycaster.)
         pointer (THREE/Vector2.)
         state #js {:holding false :zoom 1.0 :t 0 :walk 0 :raf nil :last nil
-                   :health max-health :respawned -10}
+                   :health max-health :respawned -10
+                   :goal nil :carrying nil :down-at 0 :down-x 0 :down-y 0 :side 1}
+        pick-up! (fn [^js rock]
+                   (let [s (.. rock -userData -size)]
+                     (let [i (.indexOf obstacles (.. rock -userData -obstacle))]
+                       (when (>= i 0) (.splice obstacles i 1)))
+                     (.add group rock)
+                     (.set (.-position rock) 0 (+ 2.2 (* 0.35 s)) 0)
+                     (set! (.-carrying state) rock)))
+        put-down! (fn [x z]
+                    (let [^js rock (.-carrying state)
+                          s (.. rock -userData -size)]
+                      (.add scene rock)
+                      (.set (.-position rock) x (+ (height-at x z) (* 0.15 s)) z)
+                      (let [o (rock-obstacle rock)]
+                        (set! (.. rock -userData -obstacle) o)
+                        (.push obstacles o))
+                      (set! (.-carrying state) nil)))
+        rock-under-pointer (fn []
+                             (.setFromCamera raycaster pointer camera)
+                             (let [^js hit (aget (.intersectObjects raycaster rocks false) 0)]
+                               (when (and hit (not= (.-object hit) (.-carrying state)))
+                                 (.-object hit))))
+        on-click (fn []
+                   (if-let [rock (and (not (.-carrying state)) (rock-under-pointer))]
+                     (set! (.-goal state) #js {:kind "pickup" :rock rock})
+                     (when (.-carrying state)
+                       (.setFromCamera raycaster pointer camera)
+                       (when-let [^js hit (aget (.intersectObject raycaster terrain) 0)]
+                         (set! (.-goal state) #js {:kind "drop" :x (.. hit -point -x) :z (.. hit -point -z)})))))
         respawn! (fn []
+                   (set! (.-goal state) nil)
                    (.set (.-position group) (first start) (height-at (first start) (second start)) (second start))
                    (set! (.-health state) max-health)
                    (set! (.-respawned state) (.-t state))
@@ -273,11 +317,27 @@
                   (when (= 0 (.-button e))
                     (set-pointer e)
                     (set! (.-holding state) true)
+                    (set! (.-goal state) nil)
+                    (set! (.-down-at state) (.-t state))
+                    (set! (.-down-x state) (.-clientX e))
+                    (set! (.-down-y state) (.-clientY e))
                     (.setPointerCapture (.-domElement renderer) (.-pointerId e))))
-        on-move (fn [e] (set-pointer e))
-        on-up (fn [_]
-                (set! (.-holding state) false)
-                (set! (.-visible marker) false))
+        on-move (fn [^js e]
+                  (set-pointer e)
+                  (when-not (.-holding state)
+                    (set! (.. renderer -domElement -style -cursor)
+                          (if (and (not (.-carrying state)) (rock-under-pointer)) "pointer" ""))))
+        on-up (fn [^js e]
+                (when (.-holding state)
+                  (set! (.-holding state) false)
+                  (set! (.-visible marker) false)
+                  ;; a short press without dragging is a click: pick up a rock or put one down
+                  (when (and (< (- (.-t state) (.-down-at state)) 0.3)
+                             (< (js/Math.hypot (- (.-clientX e) (.-down-x state))
+                                               (- (.-clientY e) (.-down-y state)))
+                                8))
+                    (set-pointer e)
+                    (on-click))))
         on-wheel (fn [^js e]
                    (.preventDefault e)
                    (set! (.-zoom camera)
@@ -289,32 +349,65 @@
                       _ (set! (.-last state) now)
                       t (+ (.-t state) dt)
                       pos (.-position group)
+                      ;; where to walk: the pointer while the button is held, otherwise a
+                      ;; clicked rock to pick up or a clicked spot to put the carried rock down
+                      ^js goal (.-goal state)
+                      target
+                      (cond
+                        (.-holding state)
+                        (do (.setFromCamera raycaster pointer camera)
+                            (when-let [hit (aget (.intersectObject raycaster terrain) 0)]
+                              (let [p (.-point hit)] #js [(.-x p) (.-z p) 0.15])))
+
+                        (and goal (= "pickup" (.-kind goal)))
+                        (let [rp (.. goal -rock -position)]
+                          #js [(.-x rp) (.-z rp) (+ 0.85 (* 0.45 (.. goal -rock -userData -size)))])
+
+                        goal
+                        #js [(.-x goal) (.-z goal)
+                             (+ 0.95 (* 0.45 (.. ^js (.-carrying state) -userData -size)))])
                       moving
-                      (when (.-holding state)
-                        (.setFromCamera raycaster pointer camera)
-                        (when-let [hit (aget (.intersectObject raycaster terrain) 0)]
-                          (let [p (.-point hit)
-                                dx (- (.-x p) (.-x pos)) dz (- (.-z p) (.-z pos))
-                                dist (js/Math.sqrt (+ (* dx dx) (* dz dz)))]
-                            (.set (.-position marker) (.-x p) (+ (.-y p) 0.05) (.-z p))
+                      (when target
+                        (let [tx (aget target 0) tz (aget target 1)
+                              dx (- tx (.-x pos)) dz (- tz (.-z pos))
+                              dist (js/Math.sqrt (+ (* dx dx) (* dz dz)))]
+                            (.set (.-position marker) tx (+ (max water-level (height-at tx tz)) 0.05) tz)
                             (set! (.-visible marker) true)
-                            (when (> dist 0.15)
+                            (if (<= dist (aget target 2))
+                              (when goal
+                                (if (= "pickup" (.-kind goal))
+                                  (pick-up! (.-rock goal))
+                                  (put-down! (.-x goal) (.-z goal)))
+                                (set! (.-goal state) nil)
+                                (set! (.-visible marker) false)
+                                false)
                               (let [depth (water-depth (.-x pos) (.-z pos))
-                                    speed (* walk-speed (if (> depth 0.1) (max 0.4 (- 0.75 (* 0.1 depth))) 1))
+                                    speed (* walk-speed
+                                             (if (.-carrying state) 0.8 1)
+                                             (if (> depth 0.1) (max 0.4 (- 0.75 (* 0.1 depth))) 1))
                                     step (min dist (* speed dt))
-                                    nx (+ (.-x pos) (* step (/ dx dist)))
-                                    nz (+ (.-z pos) (* step (/ dz dist)))
-                                    target-rot (js/Math.atan2 dx dz)
-                                    diff (-> (- target-rot (.. group -rotation -y))
-                                             (+ js/Math.PI) (mod (* 2 js/Math.PI)) (- js/Math.PI))]
-                                (set! (.. group -rotation -y)
-                                      (+ (.. group -rotation -y) (* diff (min 1 (* 12 dt)))))
-                                (cond
-                                  (not (blocked? obstacles nx nz)) (do (set! (.-x pos) nx) (set! (.-z pos) nz) true)
-                                  ;; slide along obstacles and shores
-                                  (not (blocked? obstacles nx (.-z pos))) (do (set! (.-x pos) nx) true)
-                                  (not (blocked? obstacles (.-x pos) nz)) (do (set! (.-z pos) nz) true)
-                                  :else false))))))
+                                    heading (js/Math.atan2 dx dz)
+                                    side (.-side state)
+                                    ;; walk straight if possible, otherwise veer around the
+                                    ;; obstacle, keeping to the same side as last time
+                                    free (some (fn [turn]
+                                                 (let [a (+ heading (* side turn))
+                                                       sx (js/Math.sin a) sz (js/Math.cos a)
+                                                       look (max step 0.3)]
+                                                   (when-not (blocked? obstacles
+                                                                       (+ (.-x pos) (* look sx))
+                                                                       (+ (.-z pos) (* look sz)))
+                                                     a)))
+                                               [0 0.5 -0.5 1.0 -1.0 1.5 -1.5 2.0 -2.0])]
+                                (if free
+                                  (let [diff (-> (- free (.. group -rotation -y))
+                                                 (+ js/Math.PI) (mod (* 2 js/Math.PI)) (- js/Math.PI))]
+                                    (set! (.. group -rotation -y)
+                                          (+ (.. group -rotation -y) (* diff (min 1 (* 12 dt)))))
+                                    (set! (.-x pos) (+ (.-x pos) (* step (js/Math.sin free))))
+                                    (set! (.-z pos) (+ (.-z pos) (* step (js/Math.cos free))))
+                                    true)
+                                  (do (set! (.-side state) (- side)) false))))))
                       walk (if moving (+ (.-walk state) (* dt 11)) (* (.-walk state) 0.85))
                       swing (if moving (* 0.7 (js/Math.sin walk)) (* (.. (first legs) -rotation -x) 0.8))]
                   (set! (.-t state) t)
@@ -323,8 +416,12 @@
                                      (if moving (* 0.06 (js/Math.abs (js/Math.sin walk))) 0)))
                   (set! (.. (first legs) -rotation -x) swing)
                   (set! (.. (second legs) -rotation -x) (- swing))
-                  (set! (.. (first arms) -rotation -x) (- swing))
-                  (set! (.. (second arms) -rotation -x) swing)
+                  (if (.-carrying state)
+                    ;; arms raised to hold the rock above the head
+                    (do (set! (.. (first arms) -rotation -x) (+ js/Math.PI (* 0.1 swing)))
+                        (set! (.. (second arms) -rotation -x) (- js/Math.PI (* 0.1 swing))))
+                    (do (set! (.. (first arms) -rotation -x) (- swing))
+                        (set! (.. (second arms) -rotation -x) swing)))
                   (set! (.. head -rotation -z) (* 0.05 (js/Math.sin (* t 1.7))))
                   ;; water rusts the robot; dry land slowly repairs it
                   (let [depth (water-depth (.-x pos) (.-z pos))
@@ -352,7 +449,10 @@
                                   wet "Apua, virtapiirini ruostuvat!"
                                   :else ""))
                       (set! (.. bubble -style -display) (if (or wet just-respawned) "block" "none")))
-                    (when (<= health 0) (respawn!)))
+                    (when (<= health 0)
+                      ;; a rusted-through robot drops what it carries where it stands
+                      (when (.-carrying state) (put-down! (.-x pos) (.-z pos)))
+                      (respawn!)))
                   (.setHex ^js (.-color (.-material ^js bulb)) (if (< (mod t 1.2) 0.6) 0xff4040 0x661818))
                   (.set (.. marker -scale) 1 1 1)
                   (.multiplyScalar (.. marker -scale) (+ 1 (* 0.15 (js/Math.sin (* t 8)))))
