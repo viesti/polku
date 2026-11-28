@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Opens the app in the default browser once the first frontend build is done.
+# Skipped over SSH or without a display; set NO_OPEN=1 to skip it anyway. Never fails the dev run.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+URL="http://localhost:3100"
+
+if [ -n "${NO_OPEN:-}" ]; then exit 0; fi
+if [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
+  echo "SSH session; open $URL (or your forwarded address) yourself."
+  exit 0
+fi
+if command -v open >/dev/null && [ "$(uname)" = Darwin ]; then
+  opener=open
+elif command -v xdg-open >/dev/null && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  opener=xdg-open
+else
+  echo "No browser to open here; open $URL yourself."
+  exit 0
+fi
+
+for _ in $(seq 1 180); do
+  if curl -sf "$URL" >/dev/null && grep -q 'Build completed' .dev.log 2>/dev/null; then
+    if "$opener" "$URL" >/dev/null 2>&1; then
+      echo "Opened $URL"
+    else
+      echo "Could not open a browser; open $URL yourself."
+    fi
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "The app did not come up within three minutes; open $URL yourself once it has." >&2

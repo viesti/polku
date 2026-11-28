@@ -1,0 +1,9 @@
+node_modules/
+.shadow-cljs/
+.polku/
+resources/public/js/
+resources/public/css/
+dist/
+.dev.log
+.clj-kondo/
+.playwright-mcp/

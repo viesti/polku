@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Runs the shadow-cljs watch. SHADOW_DEVTOOLS_URL, such as https://<host>/shadow behind a reverse
+# proxy that forwards that path to port 9730, becomes the live reload address. The config file
+# cannot carry it, because shadow-cljs rejects an empty :devtools-url.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ -n "${SHADOW_DEVTOOLS_URL:-}" ]; then
+  exec shadow-cljs watch app --config-merge "{:devtools {:devtools-url \"$SHADOW_DEVTOOLS_URL\"}}"
+fi
+exec shadow-cljs watch app
