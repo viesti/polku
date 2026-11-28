@@ -3536,6 +3536,7 @@
                                        :x hx :y top :life 150}))
              lost?
              (-> (add-coins quest-reward)
+                 (update-in [:today :quests] (fnil conj []) {:kind :friend})
                  (assoc-in [:quest :stage] :done)
                  (update :popups conj {:text (str "Quest complete! The friends are neighbours. +" quest-reward)
                                        :icon :coin :x hx :y top :life 240}))))
@@ -3569,6 +3570,9 @@
       ({:hay "Hay" :ore "Iron Ore"} id)
       (name id)))
 
+(defn- item-plural [id]
+  (case id :hay "Hay" :torch "Torches" (str (item-name id) "s")))
+
 (defn- new-wish
   "Returns a quest offered by the Fluffy living in house `hi`: a lost friend, a sick
   Fluffy wanting a Healing Potion, a wish for an item, or a wish for a colour other
@@ -3589,7 +3593,7 @@
   [{:keys [kind item count color]}]
   (case kind
     :sick "I feel sick!"
-    :item (str "I'd love " count " " (item-name item) (when (and (> count 1) (not (#{:hay} item))) "s") "!")
+    :item (str "I'd love " count " " (if (> count 1) (item-plural item) (item-name item)) "!")
     :color (str "I want to be " color "!")
     "My red friend is lost"))
 
@@ -3686,6 +3690,7 @@
         (add-coins wish-reward)
         (stash [(assoc (select-keys (first (filter #(= id (:id %)) loot)) [:id :name :icon]) :count count)])
         (tally :wishes 1)
+        (update-in [:today :quests] (fnil conj []) (select-keys quest [:kind :item :count :color]))
         (assoc-in [:quest :stage] :done)
         (update :popups conj {:text (str "Wish granted! Thank you! +" wish-reward " and " count " " (item-name id))
                               :icon :coin :x hx :y (- (house-bottom h) house-h 14) :life 240}))))
@@ -3701,7 +3706,7 @@
           [hx _] (house-hole h)]
       (if (>= (bag-count bag item) count)
         (-> st (take-from-bag item count) grant-wish)
-        (update st :popups conj {:text (str "Bring " count " " (item-name item) " from your bag")
+        (update st :popups conj {:text (str "Bring " count " " (if (> count 1) (item-plural item) (item-name item)) " from your bag")
                                  :x hx :y (- (house-bottom h) house-h 14) :life 120})))))
 
 (defn- check-colour-wish
@@ -4072,7 +4077,7 @@
          (case kind
            (:sick :item)
            ($ :ul {:class "space-y-0.5"}
-              (step have? (str "Get " count " " (item-name item) (when (= :sick kind) " (the shop sells them)")))
+              (step have? (str "Get " count " " (if (> count 1) (item-plural item) (item-name item)) (when (= :sick kind) " (the shop sells them)")))
               (step false "Press E by the Fluffy's house to hand it over"))
            :color
            ($ :ul {:class "space-y-0.5"}
@@ -4961,6 +4966,36 @@
                      (str "Our miner walked past the end of the valley into the Mountains and dug out "
                           (plural (:ore log 0) "lump" "lumps") " of iron ore. The smiths are delighted.")
                      "Our miner walked past the end of the valley into the Mountains. Locals say there is iron in that rock, if you dig deep enough.")})
+          (when-let [quests (seq (:quests log))]
+            {:score (+ 30 (* 10 (count quests))) :pic {:icon :house}
+             :title (if (next quests)
+                      (p :quests ["FLUFFY WISHES COME TRUE" "HAPPY FLUFFIES ALL ROUND" "A GOOD DAY FOR FLUFFIES"])
+                      (case (:kind (first quests))
+                        :friend "LOST FLUFFY FINDS ITS WAY HOME"
+                        :sick "SICK FLUFFY MAKES FULL RECOVERY"
+                        :color (str "FLUFFY GOES " (str/upper-case (:color (first quests) "")))
+                        "FLUFFY GETS ITS WISH"))
+             :text (str/join " "
+                             (map-indexed
+                              (fn [i {:keys [kind item count color]}]
+                                (let [q (fn [options] (pick seed [:quest i] options))
+                                      [what quotes]
+                                      (case kind
+                                        :friend ["A lost red Fluffy was found and moved in next door to its friend."
+                                                 ["We're neighbours now. Best day ever!" "I knew someone would find my friend!"
+                                                  "Now I have someone to chat with over the fence."]]
+                                        :sick ["A Fluffy who felt sick was brought a Healing Potion."
+                                               ["I feel as good as new!" "My fluff is fluffy again!"
+                                                "That potion tasted of strawberries. Thank you!"]]
+                                        :color [(str "A Fluffy was painted " color ", just as it wished.")
+                                                [(str (str/capitalize (or color "")) " suits me perfectly!")
+                                                 "I feel like a whole new Fluffy!" "Everyone in the valley will notice me now!"]]
+                                        [(str "A Fluffy who wished for " (plural count (item-name item) (item-plural item)) " got its wish.")
+                                         (if (= :hay item)
+                                           ["I'm not a goat, but this hay makes a lovely bed!" "So soft! I'll sleep like a log."]
+                                           ["Exactly what I wanted!" "I'll treasure it forever." "Best present ever!"])])]
+                                  (str what " \"" (q quotes) "\" said the Fluffy.")))
+                              quests))})
           (when (pos? (:calmed log 0))
             {:score (+ 18 (* 3 (:butted log 0))) :pic {:icon :hay}
              :title (p :goats ["GOAT CALMED WITH HAY" "PEACE RETURNS TO THE PEAKS" "MINER MAKES FRIENDS WITH GOAT"])
