@@ -2495,10 +2495,25 @@
   "Keeps up to `max-robbers` robbers on the overworld's surface, moves them and lets a
   robber that touches the player steal 10 to 20 coins and run off with them. Robbers
   far from the player wander off for good. The wait for the next robber runs only
-  while there is room for one, and starts again when one comes."
-  [{:keys [realm player robbers coins] :as st} dt]
-  (if (not= realm :overworld)
+  at night while there is room for one, and starts again when one comes. Robbers
+  come out only at night, and any still about at sunrise vanish in a puff of smoke."
+  [{:keys [realm player robbers coins] :as st} clock dt]
+  (cond
+    (not= realm :overworld)
     st
+
+    ;; robbers come out only at night; at sunrise they run off in a puff of smoke
+    (:day? (time-of-day clock))
+    (cond-> st
+      (seq robbers)
+      (-> (assoc :robbers [])
+          (update :particles into
+                  (for [{:keys [x y]} robbers k (range 16)]
+                    {:x (+ x (* robber-w (js/Math.random))) :y (+ y (* robber-h (js/Math.random)))
+                     :vx (- (* 3 (js/Math.random)) 1.5) :vy (- (* -2 (js/Math.random)) 0.5)
+                     :life (+ 25 (* 25 (js/Math.random))) :color "rgba(200,200,200,0.8)" :i k}))))
+
+    :else
     (let [tiles (get-in st [:worlds :overworld :tiles])
           px (+ (:x player) (/ player-w 2))
           room? (< (count robbers) max-robbers)
@@ -3532,6 +3547,52 @@
 
 (def quest-wait (* 5 60000))
 
+;; besides asking for a lost friend, a Fluffy can feel sick, wish for an item or wish
+;; for a new colour
+(def wish-items
+  [{:id :ruby :count 1} {:id :torch :count 5} {:id :bar :count 2} {:id :hay :count 3}])
+
+(def wish-colors
+  [{:name "green" :hue 180} {:name "orange" :hue 60} {:name "purple" :hue 300}
+   {:name "red" :hue 0} {:name "yellow" :hue 120} {:name "blue" :hue 240}])
+
+(def wish-reward 50)
+
+(def wish-gifts
+  [{:id :potion :count 2} {:id :ruby :count 1} {:id :rope :count 8} {:id :torch :count 5}])
+
+(defn- hue-gap [a b]
+  (js/Math.abs (- (mod (+ (- b a) 540) 360) 180)))
+
+(defn- item-name [id]
+  (or (:name (first (filter #(= id (:id %)) loot)))
+      ({:hay "Hay" :ore "Iron Ore"} id)
+      (name id)))
+
+(defn- new-wish
+  "Returns a quest offered by the Fluffy living in house `hi`: a lost friend, a sick
+  Fluffy wanting a Healing Potion, a wish for an item, or a wish for a colour other
+  than the one it has."
+  [{:keys [houses fluffies]} hi]
+  (let [f (get fluffies (get-in houses [hi :resident]))
+        kind (rand-nth [:friend :sick :item :color])]
+    (case kind
+      :friend {:stage :offered :giver hi :kind :friend}
+      :sick {:stage :offered :giver hi :kind :sick :item :potion :count 1}
+      :item (let [{:keys [id count]} (rand-nth wish-items)]
+              {:stage :offered :giver hi :kind :item :item id :count count})
+      :color (let [c (rand-nth (filterv #(> (hue-gap (:hue %) (fluffy-hue (or f {}))) 30) wish-colors))]
+               {:stage :offered :giver hi :kind :color :color (:name c) :hue (:hue c)}))))
+
+(defn wish-title
+  "Returns what the Fluffy of quest `q` says it wants."
+  [{:keys [kind item count color]}]
+  (case kind
+    :sick "I feel sick!"
+    :item (str "I'd love " count " " (item-name item) (when (and (> count 1) (not (#{:hay} item))) "s") "!")
+    :color (str "I want to be " color "!")
+    "My red friend is lost"))
+
 (defn- offer-quest
   "Lets the Fluffy of a random lived-in house ask for help at a random moment within
   `quest-wait` of the game clock, counted from the start or from the last finished
@@ -3550,7 +3611,7 @@
 
       (>= clock next-quest-at)
       (-> st
-          (assoc :quest {:stage :offered :giver (rand-nth homes)})
+          (assoc :quest (new-wish st (rand-nth homes)))
           (dissoc :next-quest-at))
 
       :else st)))
@@ -3584,6 +3645,17 @@
   lost red Fluffy into the world. Returns nil when there is no quest to accept here."
   [st]
   (when (quest-giver-near? st)
+    (if (#{:sick :item :color} (get-in st [:quest :kind]))
+      (let [{:keys [kind] :as q} (:quest st)
+            h (get (:houses st) (:giver q))
+            [hx _] (house-hole h)]
+        (-> st
+            (assoc-in [:quest :stage] :active)
+            (update :popups conj {:text (case kind
+                                          :sick "I feel sick! Could you bring me a Healing Potion?"
+                                          :item (str (wish-title q) " Could you bring them to my house?")
+                                          :color (str (wish-title q) " Could you paint me with the shop's paints?"))
+                                  :x hx :y (- (house-bottom h) house-h 14) :life 300})))
     (let [{:keys [tiles surface]} (get-in st [:worlds :overworld])
           h (get (:houses st) (get-in st [:quest :giver]))
           [hx _] (house-hole h)
@@ -3592,7 +3664,55 @@
           (update :fluffies (fnil conj []) friend)
           (update :quest assoc :stage :active :friend (count (:fluffies st)))
           (update :popups conj {:text "My red friend is lost! Please find it and build it a home near mine."
-                                :x hx :y (- (house-bottom h) house-h 14) :life 300})))))
+                                :x hx :y (- (house-bottom h) house-h 14) :life 300}))))))
+
+(defn- wish-house-near?
+  "Checks that the player stands by the house whose Fluffy made the wish in progress."
+  [{:keys [quest houses player realm]}]
+  (when-let [h (and (= :active (:stage quest)) (get houses (:giver quest)))]
+    (let [[hx hy] (house-hole h)]
+      (and (= realm (:realm h))
+           (<= (js/Math.hypot (- hx (+ (:x player) (/ player-w 2)))
+                              (- hy (+ (:y player) (/ player-h 2))))
+               quest-reach)))))
+
+(defn- grant-wish
+  "Finishes the wish in progress: pays `wish-reward` coins and a random gift."
+  [{:keys [quest houses] :as st}]
+  (let [h (get houses (:giver quest))
+        [hx _] (house-hole h)
+        {:keys [id count]} (rand-nth wish-gifts)]
+    (-> st
+        (add-coins wish-reward)
+        (stash [(assoc (select-keys (first (filter #(= id (:id %)) loot)) [:id :name :icon]) :count count)])
+        (tally :wishes 1)
+        (assoc-in [:quest :stage] :done)
+        (update :popups conj {:text (str "Wish granted! Thank you! +" wish-reward " and " count " " (item-name id))
+                              :icon :coin :x hx :y (- (house-bottom h) house-h 14) :life 240}))))
+
+(defn- give-wish
+  "Hands the item a Fluffy wished for to it when the player stands by its house and
+  has enough in the bag, or says what is still missing. Returns nil away from the
+  house or when the wish is not for an item."
+  [{:keys [quest bag] :as st}]
+  (when (and (#{:sick :item} (:kind quest)) (wish-house-near? st))
+    (let [{:keys [item count]} quest
+          h (get (:houses st) (:giver quest))
+          [hx _] (house-hole h)]
+      (if (>= (bag-count bag item) count)
+        (-> st (take-from-bag item count) grant-wish)
+        (update st :popups conj {:text (str "Bring " count " " (item-name item) " from your bag")
+                                 :x hx :y (- (house-bottom h) house-h 14) :life 120})))))
+
+(defn- check-colour-wish
+  "Grants a colour wish as soon as the Fluffy has been painted the colour it wanted."
+  [{:keys [quest houses fluffies] :as st}]
+  (if-let [f (and (= :active (:stage quest)) (= :color (:kind quest))
+                  (get fluffies (get-in houses [(:giver quest) :resident])))]
+    (if (<= (hue-gap (fluffy-hue f) (:hue quest)) 25)
+      (grant-wish st)
+      st)
+    st))
 
 (defn- place-house
   "Sets a Fluffy House on open ground at the tile under the mouse, within `reach` of the
@@ -3886,10 +4006,40 @@
         (set! (.-textAlign ctx) "center")
         (.fillText ctx "E" sx (- sy 22))))))
 
+(defn- draw-wish-mark
+  "Draws a speech bubble over the house of a Fluffy with a wish in progress, showing
+  the item it wants or a blob of the colour it wants to be, with an E key hint while
+  the player is close enough to hand an item over."
+  [^js ctx {:keys [quest houses realm bag] :as st} clock cam-x cam-y]
+  (when-let [h (and (= :active (:stage quest)) (#{:sick :item :color} (:kind quest))
+                    (get houses (:giver quest)))]
+    (when (= realm (:realm h))
+      (let [sx (js/Math.round (- (+ (:x h) (/ house-w 2)) cam-x))
+            sy (js/Math.round (- (house-bottom h) house-h cam-y 16 (* 3 (js/Math.sin (/ clock 250)))))]
+        (set! (.-fillStyle ctx) "rgba(255,255,255,0.92)")
+        (.fillRect ctx (- sx 13) (- sy 26) 26 24)
+        (.fillRect ctx (- sx 3) (- sy 2) 6 4)
+        (if (= :color (:kind quest))
+          (do (set! (.-fillStyle ctx) (str "hsl(" (js/Math.round (screen-hue (:hue quest))) ",72%,52%)"))
+              (.beginPath ctx)
+              (.arc ctx sx (- sy 14) 8 0 (* 2 js/Math.PI))
+              (.fill ctx))
+          (icons/draw! ctx (:item quest) (- sx 10) (- sy 24) 2))
+        (when (and (#{:sick :item} (:kind quest)) (wish-house-near? st))
+          (.save ctx)
+          (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
+          (.fillRect ctx (+ sx 16) (- sy 22) 16 16)
+          (set! (.-fillStyle ctx) "#ffffff")
+          (set! (.-font ctx) "bold 12px system-ui, sans-serif")
+          (set! (.-textAlign ctx) "center")
+          (.fillText ctx "E" (+ sx 24) (- sy 10))
+          (.restore ctx))))))
+
 (defn- draw-quest-mark
   "Draws a bobbing yellow exclamation mark over the house that offers a quest, with an
   E key hint beside it while the player is close enough to accept."
   [^js ctx {:keys [quest houses realm] :as st} clock cam-x cam-y]
+  (draw-wish-mark ctx st clock cam-x cam-y)
   (when-let [h (and (= :offered (:stage quest)) (get houses (:giver quest)))]
     (when (= realm (:realm h))
       (let [sx (- (+ (:x h) (/ house-w 2)) cam-x)
@@ -3909,17 +4059,27 @@
 
 (defui quest-panel
   "Shows the steps of the quest in progress, ticking off each one the player has done."
-  [{:keys [quest]}]
+  [{:keys [quest bag]}]
   (when (= :active (:stage quest))
-    (let [{:keys [found?]} quest
+    (let [{:keys [found? kind item count color]} quest
           step (fn [done? text]
                  ($ :li {:class (if done? "text-emerald-300 line-through" "text-amber-50")}
-                    (if done? "✓ " "• ") text))]
+                    (if done? "✓ " "• ") text))
+          have? (and item (>= (bag-count bag item) count))]
       ($ :div {:class "w-64 rounded-md border border-amber-600/60 bg-black/60 px-3 py-2 text-sm select-none"}
-         ($ :div {:class "mb-1 font-bold text-amber-300"} "! Quest: My red friend is lost")
-         ($ :ul {:class "space-y-0.5"}
-            (step found? "Find the red Fluffy (it shows on your map) and press E")
-            (step false "Place a Fluffy House within 40 blocks of its friend's house"))))))
+         ($ :div {:class "mb-1 font-bold text-amber-300"}
+            (if (#{:sick :item :color} kind) (str "! Wish: " (wish-title quest)) "! Quest: My red friend is lost"))
+         (case kind
+           (:sick :item)
+           ($ :ul {:class "space-y-0.5"}
+              (step have? (str "Get " count " " (item-name item) (when (= :sick kind) " (the shop sells them)")))
+              (step false "Press E by the Fluffy's house to hand it over"))
+           :color
+           ($ :ul {:class "space-y-0.5"}
+              (step false (str "Paint the Fluffy " color " with the shop's paints; each coat mixes halfway with its colour")))
+           ($ :ul {:class "space-y-0.5"}
+              (step found? "Find the red Fluffy (it shows on your map) and press E")
+              (step false "Place a Fluffy House within 40 blocks of its friend's house")))))))
 
 (defn- use-slot
   "Uses the item in bag slot `i`. A Healing Potion restores `potion-heal` hit points
@@ -4071,7 +4231,8 @@
          ($ help-section {:title "Fluffies"}
             ($ :li "Rare blue Fluffies hide in caves around the world; press E next to one to make it follow you, and E again to let it wait")
             ($ :li "Buy a Fluffy House at the shop and place it on the ground from the bag; a Fluffy following you moves into an empty house and pays you " house-reward " coins")
-            ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")))
+            ($ :li "Buy red, yellow or blue paint at the shop, point at a Fluffy near you and use the paint from the bag to colour it; each new colour mixes halfway with the old one, so a blue Fluffy painted yellow turns green")
+            ($ :li "Now and then a Fluffy in a house has a wish, shown by a ! over its house: press E there to hear it. It may have lost a friend, feel sick and want a Healing Potion, want an item, or want a new colour; a granted wish pays " wish-reward " coins and a gift")))
        (when (seen :paper)
          ($ help-section {:title "The newspaper"}
             ($ :li "Every morning a paperboy in a red cap walks the surface; press E next to him to buy The Mine Valley Times for " paper-price " coins")
@@ -4086,7 +4247,7 @@
             ($ :li "Hay given to a calm goat makes it friendly, with a pink heart over it; press E next to it to ride it for about ten seconds, steering with A and D and leaping high with Space, until it bucks you off")))
        (when (seen :robbers)
          ($ help-section {:title "Robbers"}
-            ($ :li "Masked robbers walk the surface; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
+            ($ :li "Masked robbers come out only at night and run off at sunrise; one that touches you steals " robber-steal-min " to " robber-steal-max " coins and runs off")
             ($ :li "Knock a robber out with " robber-hp " pickaxe hits to get back half of what it stole")))
        (when (seen :drones)
          ($ help-section {:title "Drones and the spaceship"}
@@ -4959,7 +5120,7 @@
         on-press-e (fn []
                      (when-let [state @state-ref]
                        (when-not (:paused? @state)
-                         (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (mount-goat %) (toggle-fluffy %))))))
+                         (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (give-wish %) (mount-goat %) (toggle-fluffy %))))))
         on-use-slot (fn [i]
                       (when-let [state @state-ref]
                         (when-not (:paused? @state)
@@ -5016,7 +5177,7 @@
                          (case (.-code e)
                            "KeyM" (when-not (.-repeat e) (set-menu! not))
                            "KeyE" (when-not (or (.-repeat e) (:paused? @state))
-                                    (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (mount-goat %) (toggle-fluffy %))))
+                                    (swap! state #(or (paper-stand %) (toggle-shop %) (accept-quest %) (give-wish %) (mount-goat %) (toggle-fluffy %))))
                            ("Digit1" "Digit2" "Digit3" "Digit4" "Digit5" "Digit6" "Digit7" "Digit8" "Digit9" "Digit0")
                            (when-not (or (.-repeat e) (:paused? @state))
                                                              ;; Digit0 is the tenth slot
@@ -5122,7 +5283,7 @@
                                  (flow-ooze! (:tiles world) levels @flips))
                              _ (step-enemies! state (:tiles world) (:surface world) light dt)
                              _ (step-boss! state (:tiles world) dt)
-                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies offer-quest (step-sky dt) (step-space dt) (step-robbers dt) (step-goats dt) (step-paper clock dt) sow-old-hay discover))
+                             _ (swap! state #(-> % (step-fluffies clock dt) settle-fluffies check-colour-wish offer-quest (step-sky dt) (step-space dt) (step-robbers clock dt) (step-goats dt) (step-paper clock dt) sow-old-hay discover))
                              _ (set-quest! (:quest @state))
                              _ (when (and (= :slime (:realm @state)) (:gate-open? @state)
                                           (touching? player (assoc (:gate world) :w gate-w :h gate-h)))
@@ -5265,7 +5426,7 @@
        ($ :div {:class "absolute top-4 left-4 flex flex-col gap-2"}
           ($ bag-bar {:bag bag :on-use (when touch? on-use-slot)})
           ($ health-bar {:hp hp})
-          ($ quest-panel {:quest quest}))
+          ($ quest-panel {:quest quest :bag bag}))
        ($ coin-panel {:coins coins :on-menu #(set-menu! not)
                       :map? (or map? space-map?) :map-shown? map-shown? :on-map #(set-map-shown! not)})
        (when map-shown?
