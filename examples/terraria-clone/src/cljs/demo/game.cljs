@@ -1078,6 +1078,51 @@
                   (recur (inc tx)))))
             (recur (inc ty)))))))
 
+;; drawing helpers that keep busy scenes cheap: things off screen are skipped, and
+;; Fluffies and glows are drawn once into small canvases that are then stamped
+
+(defn- off-screen?
+  "Checks that the point `sx`, `sy` lies more than `m` pixels outside the canvas. The
+  canvas is measured in its own pixels, which are never fewer than CSS pixels, so
+  nothing on screen is ever skipped."
+  [^js ctx sx sy m]
+  (let [^js c (.-canvas ctx)]
+    (or (< sx (- m)) (< sy (- m)) (> sx (+ (.-width c) m)) (> sy (+ (.-height c) m)))))
+
+(defn- device-scale
+  "Returns the whole number of canvas pixels per drawing unit on `ctx`."
+  [^js ctx]
+  (max 1 (js/Math.ceil (.-a (.getTransform ctx)))))
+
+(def ^:private sprite-cache (js/Map.))
+
+(defn- cached-sprite
+  "Returns a canvas of `w` by `h` drawing units at scale `scale` holding what `paint!`
+  draws with its origin at `ox`, `oy`, painting it only the first time `key` is asked for."
+  [key scale w h ox oy paint!]
+  (let [k (str key "|" scale)]
+    (or (.get sprite-cache k)
+        (let [cv (js/document.createElement "canvas")
+              _ (set! (.-width cv) (* w scale))
+              _ (set! (.-height cv) (* h scale))
+              c (.getContext cv "2d")]
+          (when (> (.-size sprite-cache) 800) (.clear sprite-cache))
+          (.setTransform c scale 0 0 scale (* ox scale) (* oy scale))
+          (paint! c)
+          (.set sprite-cache k cv)
+          cv))))
+
+(defn- glow-sprite
+  "Returns a cached canvas of a round glow of radius `r` fading from `inner` to `outer`."
+  [scale r inner outer]
+  (cached-sprite (str "glow|" r "|" inner "|" outer) scale (* 2 r) (* 2 r) r r
+                 (fn [^js c]
+                   (let [g (.createRadialGradient c 0 0 2 0 0 r)]
+                     (.addColorStop g 0 inner)
+                     (.addColorStop g 1 outer)
+                     (set! (.-fillStyle c) g)
+                     (.fillRect c (- r) (- r) (* 2 r) (* 2 r))))))
+
 (defn- draw-flames
   "Draws a flickering flame on each visible torch and a warm glow around it that
   brightens what is already drawn, more strongly in the dark."
@@ -1086,7 +1131,8 @@
         x1 (min (dec W) (js/Math.floor (/ (+ cam-x vw torch-reach) T)))
         y0 (max 0 (js/Math.floor (/ (- cam-y torch-reach) T)))
         y1 (min (dec H) (js/Math.floor (/ (+ cam-y vh torch-reach) T)))
-        glow (+ 0.18 (* 0.32 (- 1 light)))]
+        glow (+ 0.18 (* 0.32 (- 1 light)))
+        scale (device-scale ctx)]
     (loop [ty y0]
       (when (<= ty y1)
         (loop [tx x0]
@@ -1097,13 +1143,13 @@
                     fx (+ sx 8.5)
                     fy (+ sy 4)
                     flick (* 0.5 (+ 1 (js/Math.sin (+ (/ t 90) (* 3 tx) ty))))
-                    g (.createRadialGradient ctx fx fy 2 fx fy (+ torch-reach (* 6 flick)))]
-                (.addColorStop g 0 (str "rgba(255,170,70," glow ")"))
-                (.addColorStop g 1 "rgba(255,170,70,0)")
+                    r (+ torch-reach (* 6 flick))]
+                ;; one glow image, faded by the darkness and scaled by the flicker
                 (set! (.-globalCompositeOperation ctx) "lighter")
-                (set! (.-fillStyle ctx) g)
-                (.fillRect ctx (- fx torch-reach 6) (- fy torch-reach 6)
-                           (* 2 (+ torch-reach 6)) (* 2 (+ torch-reach 6)))
+                (set! (.-globalAlpha ctx) glow)
+                (.drawImage ctx (glow-sprite scale (+ torch-reach 6) "rgba(255,170,70,1)" "rgba(255,170,70,0)")
+                            (- fx r) (- fy r) (* 2 r) (* 2 r))
+                (set! (.-globalAlpha ctx) 1)
                 (set! (.-globalCompositeOperation ctx) "source-over")
                 (set! (.-fillStyle ctx) "#ff7a1a")
                 (.fillRect ctx (+ sx 6) (- sy (js/Math.round (* 2 flick)) -2) 5 (+ 5 (js/Math.round (* 2 flick))))
@@ -3359,12 +3405,16 @@
           (when (<= a h b) (+ ra (* (- rb ra) (/ (- h a) (- b a))))))
         (partition 2 1 wheel)))
 
+(def ^:private hue-colors
+  (memoize (fn [hue]
+             (let [h (js/Math.round (screen-hue hue))]
+               [(str "hsl(" h ",100%,90%)") (str "hsl(" h ",72%,52%)") (str "hsl(" h ",100%,72%)")]))))
+
 (defn- fluffy-colors
   "Returns the wing, body and shine colours of Fluffy `f`."
   [f]
   (cond
-    (:hue f) (let [h (js/Math.round (screen-hue (:hue f)))]
-               [(str "hsl(" h ",100%,90%)") (str "hsl(" h ",72%,52%)") (str "hsl(" h ",100%,72%)")])
+    (:hue f) (hue-colors (:hue f))
     (:red? f) ["#ffd6d2" "#e0453d" "#ff8a80"]
     :else ["#cfe6ff" "#3d7be8" "#6fa3ff"]))
 
@@ -3756,7 +3806,7 @@
   `draw-house-rims` so the resident shows inside it."
   [^js ctx houses realm cam-x cam-y]
   (doseq [{:keys [x resident] :as h} houses
-          :when (= realm (:realm h))
+          :when (and (= realm (:realm h)) (not (off-screen? ctx (- x cam-x) (- (house-bottom h) cam-y) 80)))
           :let [sx (js/Math.round (- x cam-x))
                 top (js/Math.round (- (house-bottom h) house-h cam-y))
                 [hx hy] (house-hole h)
@@ -3837,7 +3887,7 @@
   `mirror-sight` shows in the glass, turned the other way and fading with distance."
   [^js ctx mirrors realm player suit? cam-x cam-y]
   (doseq [{:keys [x y] :as m} mirrors
-          :when (= realm (:realm m))
+          :when (and (= realm (:realm m)) (not (off-screen? ctx (- x cam-x) (- y cam-y) 60)))
           :let [sx (js/Math.round (- x cam-x))
                 sy (js/Math.round (- y cam-y))
                 gx (+ sx 7) gy (+ sy 5) gw 18 gh 35
@@ -3920,10 +3970,10 @@
   "Draws the wooden rim and perch of each house opening over its resident."
   [^js ctx houses realm cam-x cam-y]
   (doseq [h houses
-          :when (= realm (:realm h))
           :let [[hx hy] (house-hole h)
                 sx (- hx cam-x)
-                sy (- hy cam-y)]]
+                sy (- hy cam-y)]
+          :when (and (= realm (:realm h)) (not (off-screen? ctx sx sy 40)))]
     (set! (.-strokeStyle ctx) "#6b4423")
     (set! (.-lineWidth ctx) 3)
     (.beginPath ctx)
@@ -3931,6 +3981,8 @@
     (.stroke ctx)
     (set! (.-fillStyle ctx) "#6b4423")
     (.fillRect ctx (- sx 9) (+ sy hole-r 1) 18 3)))
+
+(declare paint-fluffy!)
 
 (defn- draw-fluffies
   "Draws the Fluffies of `realm` as fuzzy blue balls with flapping wings. A Fluffy
@@ -3942,17 +3994,29 @@
           :let [bob (* 2 (js/Math.sin (+ (/ clock 300) phase)))]]
     (draw-alien ctx (js/Math.round (- x cam-x (/ alien-w 2)))
                 (js/Math.round (+ (- y cam-y (/ alien-h 2)) bob)) 0 phase clock))
-  (doseq [{:keys [x y phase out?] :as f} fluffies
-          :when (and (= realm (:realm f)) (not (:alien? f)))
-          :let [home (and (:home f) (not out?))
-                [wing body shine] (fluffy-colors f)
-                flap (js/Math.sin (+ (/ clock 70) phase))
-                disc (fn [cx cy r]
-                       (.beginPath ctx)
-                       (.arc ctx cx cy r 0 (* 2 js/Math.PI))
-                       (.fill ctx))]]
+  (let [scale (device-scale ctx)]
+    (doseq [{:keys [x y phase out?] :as f} fluffies
+            :let [sx (js/Math.round (- x cam-x))
+                  sy (js/Math.round (- y cam-y))]
+            :when (and (= realm (:realm f)) (not (:alien? f)) (not (off-screen? ctx sx sy 30)))
+            :let [home (and (:home f) (not out?))
+                  colors (fluffy-colors f)
+                  ;; the wings take one of nine shapes, so each look is drawn only once
+                  flap (/ (js/Math.round (* 8 (js/Math.abs (js/Math.sin (+ (/ clock 70) phase))))) 8)
+                  sprite (cached-sprite (str "fluffy|" (first colors) (second colors) "|" home "|" (if home 0 flap))
+                                        scale 48 40 24 20
+                                        #(paint-fluffy! % colors home flap))]]
+      (.drawImage ctx sprite (- sx 24) (- sy 20) 48 40))))
+
+(defn- paint-fluffy!
+  "Draws a Fluffy with colours `[wing body shine]` centred on the origin, wings spread
+  by `flap` from 0 to 1, or a little smaller with its wings folded when `home`."
+  [^js ctx [wing body shine] home flap]
+  (let [disc (fn [cx cy r]
+               (.beginPath ctx)
+               (.arc ctx cx cy r 0 (* 2 js/Math.PI))
+               (.fill ctx))]
     (.save ctx)
-    (.translate ctx (js/Math.round (- x cam-x)) (js/Math.round (- y cam-y)))
     (when home (.scale ctx 0.85 0.85))
     (when-not home
       (set! (.-fillStyle ctx) wing)
@@ -3991,17 +4055,15 @@
   (let [px (+ x (/ player-w 2))
         py (+ y (/ player-h 2))]
     (doseq [f fluffies
-            :when (= realm (:realm f))
-            :let [sx (- (:x f) cam-x) sy (- (:y f) cam-y)
-                  g (.createRadialGradient ctx sx sy 2 sx sy 26)]]
-      (if-let [h (:hue f)]
-        (let [h (js/Math.round (screen-hue h))]
-          (.addColorStop g 0 (str "hsla(" h ",100%,75%,0.5)"))
-          (.addColorStop g 1 (str "hsla(" h ",100%,75%,0)")))
-        (do (.addColorStop g 0 (if (:red? f) "rgba(255,140,130,0.55)" "rgba(140,190,255,0.45)"))
-            (.addColorStop g 1 (if (:red? f) "rgba(255,140,130,0)" "rgba(140,190,255,0)"))))
-      (set! (.-fillStyle ctx) g)
-      (.fillRect ctx (- sx 26) (- sy 26) 52 52)
+            :let [sx (- (:x f) cam-x) sy (- (:y f) cam-y)]
+            :when (and (= realm (:realm f)) (not (off-screen? ctx sx sy 30)))
+            :let [[inner outer] (if-let [h (:hue f)]
+                                  (let [h (js/Math.round (screen-hue h))]
+                                    [(str "hsla(" h ",100%,75%,0.5)") (str "hsla(" h ",100%,75%,0)")])
+                                  (if (:red? f)
+                                    ["rgba(255,140,130,0.55)" "rgba(255,140,130,0)"]
+                                    ["rgba(140,190,255,0.45)" "rgba(140,190,255,0)"]))]]
+      (.drawImage ctx (glow-sprite (device-scale ctx) 26 inner outer) (- sx 26) (- sy 26) 52 52)
       (when (and (not (:following? f)) (not (:home f))
                  (<= (js/Math.hypot (- (:x f) px) (- (:y f) py)) fluffy-reach))
         (set! (.-fillStyle ctx) "rgba(0,0,0,0.6)")
@@ -4537,6 +4599,35 @@
              "Import file")
           ($ :span {:class "ml-2 text-xs text-white/50"} "Add a save from a downloaded file")))))
 
+;; the Graphics setting in the menu: Sharp always draws at the screen's full
+;; resolution, Fast at one canvas pixel per CSS pixel, and Auto switches from sharp to
+;; fast when frames stay slow
+(def ^:private graphics-key "mine-valley-graphics")
+
+(defonce ^:private graphics
+  (atom (let [v (try (js/localStorage.getItem graphics-key) (catch :default _ nil))]
+          (if (#{"sharp" "fast" "auto"} v) (keyword v) :auto))))
+
+(defonce ^:private low-res? (atom false))
+
+(defn- low-res-now? []
+  (case @graphics :fast true :sharp false @low-res?))
+
+(defn- set-graphics! [mode]
+  (reset! graphics mode)
+  (try (js/localStorage.setItem graphics-key (name mode)) (catch :default _ nil)))
+
+(defui graphics-setting []
+  (let [[mode set-mode!] (use-state @graphics)
+        btn (fn [id label]
+              ($ :button {:class (str "rounded px-2.5 py-1 font-semibold "
+                                      (if (= mode id) "bg-white/20 text-white" "text-white/60 hover:text-white"))
+                          :on-click #(do (.blur (.-currentTarget %)) (set-graphics! id) (set-mode! id))}
+                 label))]
+    ($ :div {:class "mt-4 flex items-center gap-2 border-t border-white/15 pt-3"}
+       ($ :span {:class "mr-auto text-white/80"} "Graphics")
+       (btn :auto "Auto") (btn :sharp "Sharp") (btn :fast "Fast"))))
+
 (defui menu-panel [{:keys [on-close snapshot restore seen]}]
   (let [[tab set-tab!] (use-state :help)
         tab-btn (fn [id label]
@@ -4560,14 +4651,35 @@
           (case tab
             :help ($ how-to-play {:seen seen})
             :saves ($ saves-tab {:snapshot snapshot :restore restore}))
-          ($ :div {:class "mt-4 text-xs text-white/60"} "Press M again to close")))))
+          ($ graphics-setting)
+          ($ :div {:class "mt-2 text-xs text-white/60"} "Auto draws sharp and switches to Fast if the game runs slowly. Press M again to close")))))
 
 (defn- render-scale
   "Returns the whole number of canvas pixels drawn per CSS pixel. A fractional device
   pixel ratio such as 1.25 would put tile edges between screen pixels and blend them
-  into light seams, so the browser stretches a whole-number canvas instead."
+  into light seams, so the browser stretches a whole-number canvas instead. With the
+  Fast graphics setting, or Auto once `low-res?` is set, the canvas has one pixel per
+  CSS pixel, a quarter of the work on a high-density screen, and the browser scales
+  it up smoothly."
   []
-  (max 1 (js/Math.round (or js/window.devicePixelRatio 1))))
+  (if (low-res-now?) 1 (max 1 (js/Math.round (or js/window.devicePixelRatio 1)))))
+
+;; a machine that averages slower than about 40 frames a second for a few seconds
+;; switches to `low-res?` for the rest of the session
+(def ^:private slow-frame-ms 25)
+(def ^:private slow-warmup 180)
+
+(defn- watch-speed!
+  "Feeds the time since the last frame, `ms`, into the running average in `speed`, an
+  atom of `{:avg :n}`, and turns on `low-res?` when frames stay slow. Returns true when
+  it just did."
+  [speed ms]
+  (when (and (= :auto @graphics) (not @low-res?) (< ms 250) (> (or js/window.devicePixelRatio 1) 1.25))
+    (let [{:keys [avg n]} (swap! speed (fn [{:keys [avg n]}]
+                                         {:avg (if avg (+ (* 0.97 avg) (* 0.03 ms)) ms) :n (inc n)}))]
+      (when (and (> n slow-warmup) (> avg slow-frame-ms))
+        (reset! low-res? true)
+        true))))
 
 (defn- typing? [^js e]
   (let [tag (some-> e .-target .-tagName)]
@@ -5207,11 +5319,16 @@
              outdoors? (fn [] (#{:overworld :mountains} (:realm @state)))
              raf (atom nil)
              last-t (atom nil)
+             speed (atom {:avg nil :n 0})
              flips (atom false)
              resize (fn []
                       (let [dpr (render-scale)]
                         (set! (.-width canvas) (* dpr js/window.innerWidth))
-                        (set! (.-height canvas) (* dpr js/window.innerHeight))))
+                        (set! (.-height canvas) (* dpr js/window.innerHeight))
+                        ;; a canvas with fewer pixels than the screen is stretched smoothly,
+                        ;; since blocky stretching by 1.5 makes round shapes jagged
+                        (set! (.. canvas -style -imageRendering)
+                              (if (< dpr (or js/window.devicePixelRatio 1)) "auto" "pixelated"))))
              on-down (fn [^js e]
                        (when-not (typing? e)
                          (case (.-code e)
@@ -5274,6 +5391,9 @@
                        (let [home (get-in @state [:worlds :overworld])
                              shop (:shop home)
                              dt (if @last-t (min 2 (/ (- t @last-t) 16.667)) 1)
+                             _ (when @last-t (watch-speed! speed (- t @last-t)))
+                             ;; follows a change of the Graphics setting or a switch to fast
+                             _ (when (not= (.-width canvas) (* (render-scale) js/window.innerWidth)) (resize))
                              _ (reset! last-t t)
                              space? (= :space (:realm @state))
                              player (:player (swap! state #(-> %
