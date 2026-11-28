@@ -4200,7 +4200,7 @@
         hidden (count (remove seen [:rope :slimes :dimension :goo :fluffies :robbers :drones :space :paper]))]
     ($ :div {:class "max-h-[55vh] overflow-y-auto pr-1"}
        ($ help-section {:title "Controls"}
-          ($ :li "A and D move, Space jumps")
+          ($ :li "A and D or the left and right arrow keys move, Space or the up arrow jumps")
           ($ :li "The mouse aims the pickaxe; Shift or click digs, or hits whatever is in the way")
           ($ :li "E acts on what you stand next to, such as the shop")
           ($ :li "On a tablet, the pad in the bottom left corner moves, jumps and climbs, a finger anywhere else aims and digs, the E button in the bottom right does what the E key does, and tapping a bag slot uses its item where you last touched")
@@ -4214,7 +4214,7 @@
        (when (seen :rope)
          ($ help-section {:title "Rope and torches"}
             ($ :li "Rope hangs down from where the mouse points, one rope per block; jump into it to grab it")
-            ($ :li "On a rope, Space or W climbs, S climbs down, A or D jumps off")
+            ($ :li "On a rope, Space, W or the up arrow climbs, S or the down arrow climbs down, and A, D or the left and right arrows jump off")
             ($ :li "Hit a rope with the pickaxe to take all of it back")
             ($ :li "Torches are placed from the bag like blocks and light up their surroundings; near a torch health comes back twice as fast. Hit a torch with the pickaxe to take it back")))
        (when (seen :slimes)
@@ -4569,6 +4569,11 @@
     (or (= tag "INPUT") (= tag "TEXTAREA") (some-> e .-target .-isContentEditable))))
 
 (def game-keys #{"KeyA" "KeyD" "KeyW" "KeyS" "Space" "ShiftLeft" "ShiftRight"})
+
+;; the arrow keys stand in for A, D, Space and S
+(def key-aliases {"ArrowLeft" "KeyA" "ArrowRight" "KeyD" "ArrowUp" "Space" "ArrowDown" "KeyS"})
+
+(defn- game-key [code] (get key-aliases code code))
 
 (def map-colors
   {grass [86 170 60] dirt [140 92 52] stone [118 118 128] trunk [110 72 40]
@@ -5183,10 +5188,10 @@
                                                              ;; Digit0 is the tenth slot
                              (swap! state use-slot (:tiles (here))
                                     (mod (dec (js/parseInt (subs (.-code e) 5))) bag-size)))
-                           (when (game-keys (.-code e))
+                           (when (game-keys (game-key (.-code e)))
                              (.preventDefault e)
-                             (swap! state update :keys conj (.-code e))))))
-             on-up (fn [^js e] (swap! state update :keys disj (.-code e)))
+                             (swap! state update :keys conj (game-key (.-code e)))))))
+             on-up (fn [^js e] (swap! state update :keys disj (game-key (.-code e))))
              on-blur (fn [] (swap! state assoc :keys #{} :mouse-down? false))
              ;; browsers follow a tap with made-up mouse events at the tapped spot, which
              ;; would move the aim onto the touch buttons, so mouse events soon after a
