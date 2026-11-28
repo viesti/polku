@@ -40,6 +40,8 @@ The widget's History panel lists the changes that are not yet committed, with a 
 - After each approved change, run `npx polku changes` to see the uncommitted files and the summary you stored before, then store a new one: `npx polku changes -m "<summary>"`.
 - Write it as a commit message in the user's language: a short first line that names the change (such as "Add robbers that walk the surface"), a blank line, then a few plain sentences about what changed for the user. Merge the new change into the earlier summary rather than appending a log of requests, and leave out changes that were undone.
 - A commit made in any other way, such as by you when the user asks, makes the stored summary stale, and the panel stops showing it. Store a new one when there are new changes.
+- The user may save between your requests, and saving clears the summary. Do not rebuild the summary from the one you wrote earlier; describe what `npx polku changes` lists now. `npx polku changes -m` refuses a summary that starts like the last commit's message, because it repeats changes that are already committed; rewrite it to cover only the listed files. Pass `--force` only when the new changes really begin the same way.
+- `npx polku done` reminds you when the summary is missing or older than your latest edit. Store a new one before you go back to waiting.
 
 ## Reading the pointer
 

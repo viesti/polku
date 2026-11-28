@@ -31,7 +31,10 @@
                         Show <text> in the user's browser as the step the agent is on
   done [id] -m <text>   Mark a session finished and show <text> in the user's browser
   changes -m <text>     Store <text> as the summary of the uncommitted changes that the widget's
-                        History panel shows and offers as the message when the user saves them
+                        History panel shows and offers as the message when the user saves them.
+                        Refuses a summary that starts like the last commit's message, which
+                        means it repeats changes that are already committed
+      --force           Store it anyway
   changes               Print the uncommitted files and their current summary
   summary [id]          Print the brief for a session (default: the latest)
   events [id]           Print the raw events of a session as JSON lines
@@ -56,6 +59,7 @@ Common options:
    :timeout {:type "string"}
    :message {:type "string" :short "m"}
    :type    {:type "string" :multiple true :default []}
+   :force   {:type "boolean"}
    :help    {:type "boolean" :short "h"}})
 
 (def ^:private version
@@ -64,6 +68,24 @@ Common options:
 (defn- fail! [message]
   (js/console.error (str "polku: " message))
   (js/process.exit 1))
+
+(defn- file-lines
+  "Returns one line per changed file with its status and line counts."
+  [files]
+  (for [{:keys [path status added removed]} files]
+    (str "  " (.padEnd status 9) " " path (when added (str "  +" added " -" removed)))))
+
+(defn- summary-reminder
+  "Returns a reminder to update the summary of the uncommitted changes when it is
+  missing or older than the latest edit, or nil when it is up to date."
+  [root]
+  (let [{:keys [state files]} (try (git/summary-state root) (catch :default _ {:state :none}))]
+    (when (#{:missing :stale} state)
+      (str/join "\n" (concat [(if (= state :missing)
+                                 "The uncommitted changes have no summary yet, so the History panel has no message to save them with."
+                                 "The summary of the uncommitted changes is older than the latest edit.")
+                               "Run `polku changes` and store a summary of all these changes, and only these, with `polku changes -m <text>`:"]
+                              (file-lines files))))))
 
 (defn- ensure-dirs! [root]
   (fs/mkdirSync (store/sessions-dir root) #js {:recursive true}))
@@ -288,12 +310,26 @@ Common options:
                (let [id (or (first args) (latest-active root))]
                  (when-not id (fail! "no claimed session to finish"))
                  (mark-done! root id (:message opts))
-                 (println "session" id "marked done")))
+                 (println "session" id "marked done")
+                 (when-let [reminder (summary-reminder root)]
+                   (println)
+                   (println reminder))))
    "changes" (fn [{:keys [root opts]}]
+               ;; git runs in the workspace directory, so it has to exist
+               (fs/mkdirSync root #js {:recursive true})
                (if-let [text (some-> (:message opts) str/trim not-empty)]
-                 (do (git/write-summary! root text)
-                     (println "summary of the uncommitted changes stored; the History panel shows it"))
-                 (let [{:keys [files summary]} (git/changes root)]
+                 (let [{:keys [files]} (git/changes root)]
+                   (when (and (git/repeats-last-commit? root text) (not (:force opts)))
+                     (let [{:keys [short subject]} (git/last-commit root)]
+                       (fail! (str/join "\n" (concat [(str "this summary starts like the message of the last commit, " short " \"" subject "\".")
+                                                       "That commit already holds those changes. Describe only the uncommitted ones:"]
+                                                      (if (seq files) (file-lines files) ["  (none)"])
+                                                      ["Pass --force if the summary is right as it is."])))))
+                   (git/write-summary! root text)
+                   (println "summary of the uncommitted changes stored; the History panel shows it")
+                   (println "It has to describe these uncommitted changes, and only these:")
+                   (doseq [line (if (seq files) (file-lines files) ["  (none)"])] (println line)))
+                 (let [{:keys [files summary state]} (git/summary-state root)]
                    (if (empty? files)
                      (println "no uncommitted changes")
                      (do (doseq [{:keys [path status added removed]} files]
@@ -301,7 +337,8 @@ Common options:
                                          (when added (str "  +" added " -" removed)))))
                          (println)
                          (println (if summary
-                                    (str "Summary (" (:updatedAt summary) "):\n" (:text summary))
+                                    (str "Summary (" (:updatedAt summary)
+                                         (when (= state :stale) ", older than the latest edit") "):\n" (:text summary))
                                     "No summary yet; store one with: polku changes -m <text>")))))))
    "summary" (fn [{:keys [root args]}]
                (let [id (or (first args) (latest root))]

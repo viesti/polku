@@ -135,6 +135,59 @@
      :files   files
      :summary (when (seq files) (read-summary root (git root "rev-parse" "HEAD")))}))
 
+;; Guards against a stale summary: an agent that writes the new summary from memory
+;; after the user saved tends to repeat the changes that are already committed
+
+(defn- first-sentence
+  "Returns the first line of `text` up to the end of its first sentence, lower-cased
+  and with runs of whitespace collapsed, or nil when it is blank."
+  [text]
+  (let [line (first (str/split-lines (str/trim (or text ""))))
+        line (or (second (re-find #"^(.*?[.!?])(\s|$)" (or line ""))) line)]
+    (some-> line (str/replace #"\s+" " ") str/trim str/lower-case not-empty)))
+
+(defn last-commit
+  "Returns the short hash and subject of the commit at HEAD, or nil when there is none."
+  [root]
+  (try
+    (let [[short subject] (str/split (git root "log" "-1" "--format=%h%x1f%s") #"\u001f" 2)]
+      {:short short :subject subject})
+    (catch :default _ nil)))
+
+(defn repeats-last-commit?
+  "Checks whether summary `text` starts the way the message of the last commit does,
+  which means it describes changes that the last commit already holds."
+  [root text]
+  (let [a (first-sentence text)
+        b (some-> (last-commit root) :subject first-sentence)]
+    (boolean (and a b (= a b)))))
+
+(defn- newest-edit
+  "Returns the newest modification time in milliseconds among the changed files that
+  still exist, or nil."
+  [root files]
+  (let [top (git root "rev-parse" "--show-toplevel")]
+    (some->> files
+             (keep (fn [{p :path}]
+                     (try (.-mtimeMs (fs/statSync (path/join top p))) (catch :default _ nil))))
+             seq
+             (apply max))))
+
+(defn summary-state
+  "Says whether the stored summary covers the uncommitted changes: `:none` when there
+  are no changes, `:missing` when there is no summary for them, `:stale` when a changed
+  file was edited after the summary was written, and `:current` otherwise. Returns it
+  with the changed files and the summary."
+  [root]
+  (let [{:keys [files summary]} (changes root)
+        edited (newest-edit root files)
+        state (cond
+                (empty? files) :none
+                (nil? summary) :missing
+                (and edited (> edited (.getTime (js/Date. (:updatedAt summary))))) :stale
+                :else :current)]
+    {:state state :files files :summary summary}))
+
 (defn history
   "Lists the newest commits reachable from HEAD or the main branch, with the current
   branch and commit and the uncommitted changes."
