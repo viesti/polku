@@ -1,11 +1,25 @@
 (ns roboland.app
   (:require [polku.client.core :as polku]
-            [uix.core :refer [$ defui]]
+            [roboland.game :as game]
+            [uix.core :refer [$ defui use-effect use-ref]]
             [uix.dom]))
 
-(defui app []
-  ($ :main {:class "min-h-screen flex items-center justify-center bg-slate-900 text-slate-100"}
-     ($ :h1 {:class "text-4xl font-bold"} "Roboland")))
+(defui world []
+  (let [container (use-ref nil)]
+    (use-effect
+     (fn [] (game/start! @container))
+     [])
+    ($ :div {:ref container :class "absolute inset-0"})))
+
+;; Bumped on every reload so the 3D world restarts with the new code
+(defonce reloads (atom 0))
+
+(defui app [{:keys [reload]}]
+  ($ :main {:class "fixed inset-0 overflow-hidden bg-sky-200 select-none"}
+     ($ world {:key reload})
+     ($ :div {:class "pointer-events-none absolute left-4 top-4 rounded-lg bg-slate-900/60 px-4 py-2 text-slate-100"}
+        ($ :h1 {:class "text-2xl font-bold"} "Roboland")
+        ($ :p {:class "text-sm opacity-80"} "Pidä hiiren nappia pohjassa ja osoita, minne robotti kävelee. Rullalla zoomaat."))))
 
 ;; Polku server URL, set from POLKU_ENDPOINT in shadow-cljs.edn
 (goog-define polku-endpoint "")
@@ -22,7 +36,7 @@
   (uix.dom/create-root (js/document.getElementById "app")))
 
 (defn ^:dev/after-load render []
-  (uix.dom/render-root ($ app) root))
+  (uix.dom/render-root ($ app {:reload (swap! reloads inc)}) root))
 
 (defn init []
   (when ^boolean goog.DEBUG
