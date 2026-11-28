@@ -1,0 +1,25 @@
+;; Ports are chosen so that Roboland runs next to Mine Valley (examples/terraria-clone), which
+;; uses 3000 (app), 9630 (shadow-cljs) and 4777 (Polku):
+;;   3100  the app, served by shadow-cljs's built-in dev server
+;;   9730  shadow-cljs server: live reload websocket and the shadow-cljs UI
+;;   9731  shadow-cljs nREPL
+;;   4877  the Polku ingest server (npm run polku)
+{:source-paths ["src/cljs" "../../packages/polku/src"]
+ :dependencies [[com.pitch/uix.core "1.4.9"]
+                [com.pitch/uix.dom "1.4.9"]]
+ :nrepl {:port 9731}
+ ;; Loopback only, so a reverse proxy or `tailscale serve` can forward to it
+ :http {:port 9730 :host "localhost"}
+ :dev-http {3100 {:root "resources/public" :host "localhost"}}
+ :builds
+ {:app
+  {:target     :browser
+   :output-dir "resources/public/js"
+   :asset-path "/js"
+   :modules    {:main {:init-fn roboland.app/init}}
+   ;; Behind a reverse proxy that forwards a path to port 4877, such as "/polku"
+   :closure-defines {roboland.app/polku-endpoint #shadow/env ["POLKU_ENDPOINT" ""]}
+   ;; Live reload connects to port 9730 on the page's host, over wss when the page is https.
+   ;; bin/shadow-watch replaces that address with SHADOW_DEVTOOLS_URL when it is set
+   :devtools   {:watch-dir             "resources/public"
+                :use-document-protocol true}}}}

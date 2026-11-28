@@ -1,0 +1,27 @@
+{:tasks
+ {:requires ([babashka.fs :as fs]
+             [babashka.process :refer [shell]]
+             [clojure.string :as str])
+
+  reset
+  {:doc  "Returns the example to its committed state. Discards uncommitted source changes and the recordings. Pass --yes to skip the prompt."
+   :task (let [paths   ["src" "resources"]
+               changes (:out (apply shell {:out :string} "git" "status" "--short" "--" paths))
+               running (try (slurp "http://localhost:3100/") (catch Exception _ nil))]
+           (when running
+             (println "The example is running. Stop `npm run dev` and the agent first.")
+             (System/exit 1))
+           (when-not (str/blank? changes)
+             (println "These uncommitted changes will be discarded:")
+             (print changes))
+           (println "The recordings in .polku will be deleted.")
+           (when-not (some #{"--yes"} *command-line-args*)
+             (print "Continue? [y/N] ")
+             (flush)
+             (when-not (= "y" (str/lower-case (str/trim (or (read-line) ""))))
+               (println "Nothing was changed.")
+               (System/exit 1)))
+           (apply shell "git" "restore" "--staged" "--worktree" "--" paths)
+           (apply shell "git" "clean" "-fdq" "--" paths)
+           (fs/delete-tree ".polku")
+           (println "The example is back to its committed state. Start it with `npm run dev` and `npm run agent`."))}}}

@@ -1,0 +1,24 @@
+{
+  "name": "polku-example-roboland",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm --prefix ../../packages/polku install && npm --prefix ../../packages/polku run build",
+    "cljs": "bin/shadow-watch",
+    "css": "tailwindcss -i src/css/app.css -o resources/public/css/app.css --watch=always",
+    "polku": "polku serve --port 4877",
+    "agent": "claude \"Use the polku skill: start waiting for requests, propose a plan for each one and implement it once the user approves the plan.\"",
+    "dev": "concurrently --kill-others-on-fail -n cljs,css,polku,open -c green,magenta,yellow,gray npm:cljs npm:css npm:polku npm:open 2>&1 | tee .dev.log",
+    "open": "bin/open-when-ready"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.5",
+    "concurrently": "^10.0.7",
+    "polku": "file:../../packages/polku",
+    "shadow-cljs": "^3.5.14",
+    "tailwindcss": "^4.3.5"
+  }
+}

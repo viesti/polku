@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx polku *)",
+      "Bash(curl -s localhost:3100*)",
+      "Bash(curl -s localhost:4877*)",
+      "Bash(curl -s -X * localhost:4877*)",
+      "Bash(sleep *)",
+      "Bash(grep *)",
+      "Bash(tail *)",
+      "mcp__polku",
+      "mcp__chrome-devtools"
+    ]
+  }
+}
